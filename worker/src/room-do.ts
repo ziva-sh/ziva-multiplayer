@@ -316,14 +316,19 @@ export class RoomDO extends DurableObject<Env> {
     // Console log doubles as observable signal in `wrangler tail` and in tests
     // (vitest captures console output). Analytics Engine is the prod sink.
     console.log(JSON.stringify({ event: name, ...extra }));
+    // Binding is optional in some envs (staging has it commented out until
+    // the dashboard one-time enable is clicked) — skip cleanly when absent.
+    const events = this.env.MULTIPLAYER_EVENTS;
+    if (!events) return;
     try {
-      this.env.MULTIPLAYER_EVENTS.writeDataPoint({
+      events.writeDataPoint({
         blobs: [name, JSON.stringify(extra)],
         doubles: [Date.now()],
         indexes: [name],
       });
     } catch {
-      // Analytics Engine binding may not be available in dev — don't crash.
+      // writeDataPoint can throw in local dev when miniflare's AE stub is
+      // unavailable — swallow so the relay keeps working.
     }
   }
 }
