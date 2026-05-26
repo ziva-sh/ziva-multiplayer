@@ -85,6 +85,47 @@ describe("relay", () => {
     for (const ws of sockets) ws.close();
   });
 
+  it("broadcasts peer_join to existing peers when a new peer connects", async () => {
+    const rid = `room-pjoin-${crypto.randomUUID()}`;
+    const a = await connect({ rid, sub: "pjoin-a" });
+    expect((await readWelcome(a)).peer_id).toBe(1);
+
+    // While a is alone there is no traffic. Once b connects, a should see a
+    // peer_join envelope tagged with b's peer id.
+    const aNext = a.next(500);
+    const b = await connect({ rid, sub: "pjoin-b" });
+    expect((await readWelcome(b)).peer_id).toBe(2);
+
+    const aRaw = await aNext;
+    const aEnv = JSON.parse(aRaw) as Record<string, unknown>;
+    expect(aEnv.type).toBe("peer_join");
+    expect(aEnv.peer_id).toBe(2);
+
+    a.ws.close();
+    b.ws.close();
+  });
+
+  it("broadcasts peer_leave to remaining peers when one disconnects", async () => {
+    const rid = `room-pleave-${crypto.randomUUID()}`;
+    const a = await connect({ rid, sub: "pleave-a" });
+    const b = await connect({ rid, sub: "pleave-b" });
+    expect((await readWelcome(a)).peer_id).toBe(1);
+    expect((await readWelcome(b)).peer_id).toBe(2);
+    // Drain the peer_join envelope a got when b connected.
+    const join = JSON.parse(await a.next(500)) as Record<string, unknown>;
+    expect(join.type).toBe("peer_join");
+
+    const aNext = a.next(500);
+    b.ws.close(1000, "bye");
+    await b.closed;
+    const aRaw = await aNext;
+    const aEnv = JSON.parse(aRaw) as Record<string, unknown>;
+    expect(aEnv.type).toBe("peer_leave");
+    expect(aEnv.peer_id).toBe(2);
+
+    a.ws.close();
+  });
+
   it("assigns peer ids 1, 2, 3 in order", async () => {
     const rid = `room-ids-${crypto.randomUUID()}`;
     const c1 = await connect({ rid, sub: "u1" });

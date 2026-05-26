@@ -17,7 +17,24 @@ export interface DataEnvelope {
   payload: unknown;
 }
 
-export type ServerEnvelope = WelcomeEnvelope | DataEnvelope;
+// Broadcast to all remaining peers when a peer joins (other than themselves)
+// or leaves a room. Lets clients build a peer-membership view without
+// out-of-band coordination.
+export interface PeerJoinEnvelope {
+  type: "peer_join";
+  peer_id: number;
+}
+
+export interface PeerLeaveEnvelope {
+  type: "peer_leave";
+  peer_id: number;
+}
+
+export type ServerEnvelope =
+  | WelcomeEnvelope
+  | DataEnvelope
+  | PeerJoinEnvelope
+  | PeerLeaveEnvelope;
 
 export function welcome(peerId: number): string {
   const env: WelcomeEnvelope = {
@@ -25,6 +42,16 @@ export function welcome(peerId: number): string {
     peer_id: peerId,
     protocol_version: PROTOCOL_VERSION,
   };
+  return JSON.stringify(env);
+}
+
+export function peerJoin(peerId: number): string {
+  const env: PeerJoinEnvelope = { type: "peer_join", peer_id: peerId };
+  return JSON.stringify(env);
+}
+
+export function peerLeave(peerId: number): string {
+  const env: PeerLeaveEnvelope = { type: "peer_leave", peer_id: peerId };
   return JSON.stringify(env);
 }
 

@@ -55,6 +55,28 @@ All messages are JSON for control frames; payloads may be JSON or binary.
 { "type": "welcome", "peer_id": 1, "protocol_version": 1 }
 ```
 
+Sent once to the newly-connected client. Contains the peer id assigned by
+the relay.
+
+### Server → client: `peer_join`
+
+```json
+{ "type": "peer_join", "peer_id": 2 }
+```
+
+Broadcast to every already-connected peer when a new peer joins. The new
+peer itself does not receive this — they learn their own id from `welcome`.
+
+### Server → client: `peer_leave`
+
+```json
+{ "type": "peer_leave", "peer_id": 2 }
+```
+
+Broadcast to every remaining peer when a peer disconnects (for any reason,
+including a server-side cap/rate-limit close). Lets clients keep their
+membership view consistent without out-of-band coordination.
+
 ### Client → server / server → client: `data`
 
 ```json

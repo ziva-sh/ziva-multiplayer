@@ -1,0 +1,37 @@
+[gd_scene load_steps=2 format=3 uid="uid://b7ziva7net0001"]
+
+[ext_resource type="Script" path="res://addons/ziva_net/example/example_room.gd" id="1_room"]
+
+[node name="ExampleRoom" type="Control"]
+anchor_right = 1.0
+anchor_bottom = 1.0
+script = ExtResource("1_room")
+
+[node name="V" type="VBoxContainer" parent="."]
+anchor_right = 1.0
+anchor_bottom = 1.0
+offset_left = 16.0
+offset_top = 16.0
+offset_right = -16.0
+offset_bottom = -16.0
+
+[node name="HostBtn" type="Button" parent="V"]
+text = "Host"
+
+[node name="Join" type="HBoxContainer" parent="V"]
+
+[node name="RoomIdEdit" type="LineEdit" parent="V/Join"]
+custom_minimum_size = Vector2(220, 0)
+placeholder_text = "room id"
+
+[node name="JoinBtn" type="Button" parent="V/Join"]
+text = "Join"
+
+[node name="LeaveBtn" type="Button" parent="V"]
+text = "Leave"
+
+[node name="HiBtn" type="Button" parent="V"]
+text = "Say Hi"
+
+[node name="Status" type="Label" parent="V"]
+text = "(idle)"
