@@ -27,3 +27,30 @@ id = "placeholder_replace_in_phase_3"
 
 # MULTIPLAYER_JWT_SECRET is a secret (wrangler secret put), not a [vars] entry.
 # Local tests read it from .dev.vars (gitignored).
+
+# ---- Staging environment ----
+# Deployed via `wrangler deploy --env staging`. Hostname is the default
+# *.workers.dev — ziva.sh DNS is at Namecheap so we can't easily attach a
+# custom domain (out of scope for v1).
+[env.staging]
+name = "ziva-multiplayer-staging"
+
+[[env.staging.durable_objects.bindings]]
+name = "ROOM"
+class_name = "RoomDO"
+
+[[env.staging.migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomDO"]
+
+# Analytics Engine requires a one-time dashboard enablement per account.
+# The room-do.ts writeDataPoint call is wrapped in try/catch so the absence
+# of this binding is safe (Phase 6 wires the real pipeline). Re-enable here
+# once https://dash.cloudflare.com/.../workers/analytics-engine is clicked.
+# [[env.staging.analytics_engine_datasets]]
+# binding = "MULTIPLAYER_EVENTS"
+# dataset = "ziva_multiplayer_events_staging"
+
+[[env.staging.kv_namespaces]]
+binding = "CAPS_KV"
+id = "05063c1c30b84492ac866e24de1cb36b"
