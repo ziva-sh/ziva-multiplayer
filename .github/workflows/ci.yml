@@ -23,17 +23,16 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      - name: Write .dev.vars for type generation
+        # wrangler types reads .dev.vars to know which secret bindings exist.
+        # Value is throwaway — tests sign+verify with the same secret.
+        run: echo 'MULTIPLAYER_JWT_SECRET="ci-test-secret-not-used-in-prod"' > .dev.vars
+
       - name: Generate worker types
         run: bun run types
 
       - name: Typecheck
-        # `bun run typecheck` re-runs `wrangler types`; that's fine, idempotent.
         run: bunx tsc --noEmit
 
       - name: Test
-        env:
-          # CI doesn't have a .dev.vars file; supply the secret in the
-          # environment so vitest-pool-workers can read it. Value is arbitrary
-          # because tests sign and verify with the same secret.
-          MULTIPLAYER_JWT_SECRET: "ci-test-secret-not-used-in-prod"
         run: bun run test
