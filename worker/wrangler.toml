@@ -14,10 +14,11 @@ tag = "v1"
 new_sqlite_classes = ["RoomDO"]
 
 # Analytics Engine for usage metrics (peer connects, bytes in/out).
-# Wired in Phase 6; binding exists now so the DO can write to it from day one.
-[[analytics_engine_datasets]]
-binding = "MULTIPLAYER_EVENTS"
-dataset = "ziva_multiplayer_events"
+# REQUIRES one-time account enablement; see env.staging.analytics_engine_datasets
+# comment below for details. Re-enable once Bob clicks the dashboard button.
+# [[analytics_engine_datasets]]
+# binding = "MULTIPLAYER_EVENTS"
+# dataset = "ziva_multiplayer_events"
 
 # KV namespace for soft/hard cap throttling. Populated by Phase 6.
 # Placeholder id — Phase 3 replaces with the real namespace id before deploy.
@@ -43,10 +44,14 @@ class_name = "RoomDO"
 tag = "v1"
 new_sqlite_classes = ["RoomDO"]
 
-# Analytics Engine requires a one-time dashboard enablement per account.
-# The room-do.ts writeDataPoint call is wrapped in try/catch so the absence
-# of this binding is safe (Phase 6 wires the real pipeline). Re-enable here
-# once https://dash.cloudflare.com/.../workers/analytics-engine is clicked.
+# Analytics Engine — staging dataset. Phase 6 wires the rollup cron that reads
+# from this dataset via the CF SQL API.
+#
+# REQUIRES one-time per-account enablement at:
+#   https://dash.cloudflare.com/ace16bc379f57059ee9b9afd2df8b99a/workers/analytics-engine
+# (Bob has to click the green "Enable" button — the OAuth wrangler token
+# can't enable AE programmatically, only consume it once enabled.)
+# After enabling, uncomment the binding and re-run `wrangler deploy --env staging`.
 # [[env.staging.analytics_engine_datasets]]
 # binding = "MULTIPLAYER_EVENTS"
 # dataset = "ziva_multiplayer_events_staging"
@@ -54,3 +59,34 @@ new_sqlite_classes = ["RoomDO"]
 [[env.staging.kv_namespaces]]
 binding = "CAPS_KV"
 id = "05063c1c30b84492ac866e24de1cb36b"
+
+# LOG_DRAIN_URL is plain text — POSTed-to by room-do for structured events.
+# Empty default means "no log drain"; the Worker no-ops cleanly when unset.
+[env.staging.vars]
+LOG_DRAIN_URL = ""
+
+# ---- Production environment ----
+[env.production]
+name = "ziva-multiplayer"
+
+[[env.production.durable_objects.bindings]]
+name = "ROOM"
+class_name = "RoomDO"
+
+[[env.production.migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomDO"]
+
+# See env.staging.analytics_engine_datasets comment — same enablement required.
+# [[env.production.analytics_engine_datasets]]
+# binding = "MULTIPLAYER_EVENTS"
+# dataset = "ziva_multiplayer_events"
+
+# Prod CAPS_KV must be created via `wrangler kv namespace create CAPS_KV --env production`
+# before first prod deploy and the id pasted here.
+[[env.production.kv_namespaces]]
+binding = "CAPS_KV"
+id = "placeholder_create_before_prod_deploy"
+
+[env.production.vars]
+LOG_DRAIN_URL = ""

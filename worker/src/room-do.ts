@@ -15,6 +15,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 
+import { CapState, THROTTLED_BYTES_PER_SEC } from "./cap-state";
 import {
   addPeerPacket,
   assignedPeerId,
@@ -37,16 +38,39 @@ const RATE_WINDOW_MS = 1000;
 interface SocketMeta {
   peerId: number;
   devUserId: string;
+  roomId: string;
   // Sliding window for rate limiting. Reset whenever windowStart is >1s ago.
   windowStart: number;
   windowMsgs: number;
   windowBytes: number;
+  // Per-connection byte-budget; lowered to THROTTLED_BYTES_PER_SEC when the
+  // owner devUserId is in the throttle set.
+  byteBudget: number;
+  // Cumulative bytes routed FOR THIS CONNECTION, both directions. Emitted on
+  // close so the rollup cron can attribute totals to the right user. Snapshot
+  // is bounded by AE write rate so we only emit per-window aggregates, not
+  // per-message rows.
+  totalBytesIn: number;
+  totalBytesOut: number;
 }
 
 export class RoomDO extends DurableObject<Env> {
+  private capState: CapState | null;
+  private roomId = "";
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    // env.CAPS_KV is optional in local/test envs that don't bind it. When
+    // absent we treat no user as throttled (the cap check still happens in
+    // the JWT issuer).
+    this.capState = env.CAPS_KV ? new CapState(env.CAPS_KV) : null;
     ctx.blockConcurrencyWhile(async () => {
+      // Prime the throttle cache before accepting connections so the first
+      // fetch() sees authoritative state. The DO will not handle any
+      // requests until this resolves.
+      if (this.capState) {
+        await this.capState.refresh();
+      }
       // peer_counter is the source of truth for next peer id assignment.
       // It's monotonic across hibernation; we never reuse ids. Starts at 1
       // because the server is the implicit id=1 in Godot's model; the first
@@ -83,6 +107,7 @@ export class RoomDO extends DurableObject<Env> {
       // is obvious in dev. Should never happen in prod.
       return new Response("missing_trusted_headers", { status: 500 });
     }
+    this.roomId = roomId;
 
     // Enforce room cap. getWebSockets() counts currently-attached hibernated
     // and active sockets, which is exactly what we want.
@@ -95,6 +120,17 @@ export class RoomDO extends DurableObject<Env> {
     }
 
     const peerId = this.nextPeerId();
+    const isFirstPeer = current === 0;
+
+    // Check throttle status BEFORE accepting the socket — if the user blew
+    // their hard cap the JWT issuer should already 403, so this is a defense
+    // in depth (the KV-cached set may be stale by minutes).
+    if (this.capState) {
+      this.capState.isThrottled(devUserId); // primes the cache
+    }
+    const throttled =
+      this.capState !== null && this.capState.isThrottled(devUserId);
+    const byteBudget = throttled ? THROTTLED_BYTES_PER_SEC : RATE_LIMIT_BYTES_PER_SEC;
 
     const pair = new WebSocketPair();
     const server = pair[1];
@@ -102,9 +138,13 @@ export class RoomDO extends DurableObject<Env> {
     const meta: SocketMeta = {
       peerId,
       devUserId,
+      roomId,
       windowStart: Date.now(),
       windowMsgs: 0,
       windowBytes: 0,
+      byteBudget,
+      totalBytesIn: 0,
+      totalBytesOut: 0,
     };
     // serializeAttachment stores arbitrary structured-cloneable data per
     // socket. Survives hibernation; we read it back in webSocketMessage.
@@ -136,7 +176,25 @@ export class RoomDO extends DurableObject<Env> {
       }
     }
 
-    this.logEvent("peer_join", { peerId, devUserId });
+    if (isFirstPeer) {
+      this.emitEvent({
+        event_type: "room_created",
+        devUserId,
+        roomId,
+        bytesIn: 0,
+        bytesOut: 0,
+        peerCount: 1,
+      });
+    }
+    this.emitEvent({
+      event_type: "peer_joined",
+      devUserId,
+      roomId,
+      bytesIn: 0,
+      bytesOut: 0,
+      peerCount: this.ctx.getWebSockets().length,
+      extra: { peerId, throttled },
+    });
 
     return new Response(null, { status: 101, webSocket: pair[0] });
   }
@@ -163,26 +221,44 @@ export class RoomDO extends DurableObject<Env> {
     }
     meta.windowMsgs += 1;
     meta.windowBytes += byteSize;
+    meta.totalBytesIn += byteSize;
 
     if (
       meta.windowMsgs > RATE_LIMIT_MSGS_PER_SEC ||
-      meta.windowBytes > RATE_LIMIT_BYTES_PER_SEC
+      meta.windowBytes > meta.byteBudget
     ) {
-      this.logEvent("rate_limit", { peerId: meta.peerId });
+      this.emitEvent({
+        event_type: "rate_limit_hit",
+        devUserId: meta.devUserId,
+        roomId: meta.roomId,
+        bytesIn: byteSize,
+        bytesOut: 0,
+        peerCount: this.ctx.getWebSockets().length,
+        extra: { peerId: meta.peerId, budget: meta.byteBudget },
+      });
+      ws.serializeAttachment(meta);
       ws.close(1008, "rate_limit_exceeded");
       return;
     }
 
-    ws.serializeAttachment(meta);
-
     // Strings are not part of the Godot protocol — anything text on this
     // socket is a bug in the sender. Drop it loudly so it's debuggable.
     if (typeof message === "string") {
-      this.logEvent("text_frame_dropped", { peerId: meta.peerId });
+      ws.serializeAttachment(meta);
+      this.emitEvent({
+        event_type: "text_frame_dropped",
+        devUserId: meta.devUserId,
+        roomId: meta.roomId,
+        bytesIn: byteSize,
+        bytesOut: 0,
+        peerCount: this.ctx.getWebSockets().length,
+        extra: { peerId: meta.peerId },
+      });
       return;
     }
 
     const view = new Uint8Array(message);
+    let bytesOutTotal = 0;
 
     // SYS_COMMAND_RELAY — parse the target peer and route. SceneMultiplayer
     // generates these for every @rpc / SYNC / SPAWN. The Worker rewrites
@@ -200,6 +276,9 @@ export class RoomDO extends DurableObject<Env> {
           if (!m || m.peerId !== header.targetPeer) continue;
           try {
             peer.send(out);
+            bytesOutTotal += out.byteLength;
+            m.totalBytesOut += out.byteLength;
+            peer.serializeAttachment(m);
           } catch {
             // Bad socket — its own webSocketClose handles cleanup.
           }
@@ -215,11 +294,26 @@ export class RoomDO extends DurableObject<Env> {
           if (exclude !== null && m.peerId === exclude) continue;
           try {
             peer.send(out);
+            bytesOutTotal += out.byteLength;
+            m.totalBytesOut += out.byteLength;
+            peer.serializeAttachment(m);
           } catch {
             // Bad socket — its own webSocketClose handles cleanup.
           }
         }
       }
+
+      meta.totalBytesOut += 0; // sender's own bytes-out is from receiving replies
+      ws.serializeAttachment(meta);
+
+      this.emitEvent({
+        event_type: "relay",
+        devUserId: meta.devUserId,
+        roomId: meta.roomId,
+        bytesIn: byteSize,
+        bytesOut: bytesOutTotal,
+        peerCount: this.ctx.getWebSockets().length,
+      });
       return;
     }
 
@@ -230,10 +324,26 @@ export class RoomDO extends DurableObject<Env> {
         if (peer === ws) continue;
         try {
           peer.send(view);
+          bytesOutTotal += view.byteLength;
+          const m = peer.deserializeAttachment() as SocketMeta | null;
+          if (m) {
+            m.totalBytesOut += view.byteLength;
+            peer.serializeAttachment(m);
+          }
         } catch {
           // Bad socket — its own webSocketClose handles cleanup.
         }
       }
+
+      ws.serializeAttachment(meta);
+      this.emitEvent({
+        event_type: "auth",
+        devUserId: meta.devUserId,
+        roomId: meta.roomId,
+        bytesIn: byteSize,
+        bytesOut: bytesOutTotal,
+        peerCount: this.ctx.getWebSockets().length,
+      });
       return;
     }
 
@@ -242,11 +352,20 @@ export class RoomDO extends DurableObject<Env> {
     // SceneMultiplayer client — but log + drop instead of crashing so we
     // see the problem during dev.
     const cmdLow = view.length > 0 ? view[0] & 0x7 : -1;
-    this.logEvent("unknown_packet_dropped", {
-      peerId: meta.peerId,
-      cmd: cmdLow,
-      sub: view.length > 1 ? view[1] : -1,
-      size: view.byteLength,
+    ws.serializeAttachment(meta);
+    this.emitEvent({
+      event_type: "unknown_packet_dropped",
+      devUserId: meta.devUserId,
+      roomId: meta.roomId,
+      bytesIn: byteSize,
+      bytesOut: 0,
+      peerCount: this.ctx.getWebSockets().length,
+      extra: {
+        peerId: meta.peerId,
+        cmd: cmdLow,
+        sub: view.length > 1 ? view[1] : -1,
+        size: view.byteLength,
+      },
     });
   }
 
@@ -258,17 +377,36 @@ export class RoomDO extends DurableObject<Env> {
   ): Promise<void> {
     const meta = ws.deserializeAttachment() as SocketMeta | null;
     if (meta) {
-      this.logEvent("peer_leave", { peerId: meta.peerId, code, reason });
       // Notify remaining peers so they can update their membership view.
       const leaveFrame = delPeerPacket(meta.peerId);
+      let bytesOutTotal = 0;
       for (const peer of this.ctx.getWebSockets()) {
         if (peer === ws) continue;
         try {
           peer.send(leaveFrame);
+          bytesOutTotal += leaveFrame.byteLength;
+          const m = peer.deserializeAttachment() as SocketMeta | null;
+          if (m) {
+            m.totalBytesOut += leaveFrame.byteLength;
+            peer.serializeAttachment(m);
+          }
         } catch {
           // Peer's socket is gone — its own webSocketClose handles cleanup.
         }
       }
+      // Emit per-connection totals so the rollup attributes lifetime traffic
+      // to this user. bytesIn = sum of bytes this peer sent; bytesOut = sum of
+      // bytes this peer received from others (accumulated by the sender's
+      // routing loop).
+      this.emitEvent({
+        event_type: "peer_left",
+        devUserId: meta.devUserId,
+        roomId: meta.roomId,
+        bytesIn: meta.totalBytesIn,
+        bytesOut: meta.totalBytesOut,
+        peerCount: Math.max(0, this.ctx.getWebSockets().length - 1),
+        extra: { peerId: meta.peerId, code, reason, broadcastBytes: bytesOutTotal },
+      });
     }
     // Ensure the socket is fully closed even if the close came from the peer.
     try {
@@ -276,18 +414,26 @@ export class RoomDO extends DurableObject<Env> {
     } catch {
       // Already closed.
     }
-    this.maybeLogRoomClosed();
+    this.maybeEmitRoomClosed();
   }
 
   async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
     const meta = ws.deserializeAttachment() as SocketMeta | null;
     if (meta) {
-      this.logEvent("peer_error", {
-        peerId: meta.peerId,
-        error: String((error as Error)?.message ?? error),
+      this.emitEvent({
+        event_type: "peer_error",
+        devUserId: meta.devUserId,
+        roomId: meta.roomId,
+        bytesIn: 0,
+        bytesOut: 0,
+        peerCount: this.ctx.getWebSockets().length,
+        extra: {
+          peerId: meta.peerId,
+          error: String((error as Error)?.message ?? error),
+        },
       });
     }
-    this.maybeLogRoomClosed();
+    this.maybeEmitRoomClosed();
   }
 
   // ---- internals ----
@@ -305,30 +451,102 @@ export class RoomDO extends DurableObject<Env> {
     return row.value;
   }
 
-  private maybeLogRoomClosed(): void {
+  private maybeEmitRoomClosed(): void {
     const remaining = this.ctx.getWebSockets().length;
     if (remaining === 0) {
-      this.logEvent("room_closed", {});
+      this.emitEvent({
+        event_type: "room_closed",
+        devUserId: "",
+        roomId: this.roomId,
+        bytesIn: 0,
+        bytesOut: 0,
+        peerCount: 0,
+      });
     }
   }
 
-  private logEvent(name: string, extra: Record<string, unknown>): void {
-    // Console log doubles as observable signal in `wrangler tail` and in tests
-    // (vitest captures console output). Analytics Engine is the prod sink.
-    console.log(JSON.stringify({ event: name, ...extra }));
-    // Binding is optional in some envs (staging has it commented out until
-    // the dashboard one-time enable is clicked) — skip cleanly when absent.
-    const events = this.env.MULTIPLAYER_EVENTS;
-    if (!events) return;
-    try {
-      events.writeDataPoint({
-        blobs: [name, JSON.stringify(extra)],
-        doubles: [Date.now()],
-        indexes: [name],
-      });
-    } catch {
-      // writeDataPoint can throw in local dev when miniflare's AE stub is
-      // unavailable — swallow so the relay keeps working.
+  private emitEvent(ev: {
+    event_type: string;
+    devUserId: string;
+    roomId: string;
+    bytesIn: number;
+    bytesOut: number;
+    peerCount: number;
+    extra?: Record<string, unknown>;
+  }): void {
+    // Console log doubles as observable signal in `wrangler tail` and in tests.
+    console.log(
+      JSON.stringify({
+        event: ev.event_type,
+        devUserId: ev.devUserId,
+        roomId: ev.roomId,
+        bytesIn: ev.bytesIn,
+        bytesOut: ev.bytesOut,
+        peerCount: ev.peerCount,
+        ...(ev.extra ?? {}),
+      }),
+    );
+
+    // Analytics Engine — prod sink the rollup cron reads from. Schema:
+    //   blobs[0]: event_type
+    //   blobs[1]: devUserId  (the user being billed)
+    //   blobs[2]: roomId
+    //   doubles[0]: bytesIn
+    //   doubles[1]: bytesOut
+    //   doubles[2]: peerCount
+    //   indexes[0]: devUserId — AE allows ONE index per data point and we
+    //     query "SUM(bytes) GROUP BY devUserId" so this is the right choice.
+    // The binding is optional — present only when AE is enabled on the
+    // account (see wrangler.toml comments). Cast through unknown so tsc
+    // compiles whether or not `MULTIPLAYER_EVENTS` is in the Env type.
+    const events = (this.env as unknown as { MULTIPLAYER_EVENTS?: AnalyticsEngineDataset })
+      .MULTIPLAYER_EVENTS;
+    if (events) {
+      try {
+        events.writeDataPoint({
+          blobs: [ev.event_type, ev.devUserId, ev.roomId],
+          doubles: [ev.bytesIn, ev.bytesOut, ev.peerCount],
+          indexes: [ev.devUserId],
+        });
+      } catch (err) {
+        console.log(
+          JSON.stringify({
+            event: "ae_write_error",
+            error: String((err as Error).message ?? err),
+          }),
+        );
+      }
+    }
+
+    // Mirror to the log-drain pipeline so the existing Cloudflare Worker that
+    // tails logs can ingest these events alongside web logs. Fire-and-forget.
+    const drainUrl = this.env.LOG_DRAIN_URL;
+    if (drainUrl) {
+      // ctx.waitUntil keeps the fetch alive after the handler returns without
+      // blocking message delivery.
+      this.ctx.waitUntil(
+        fetch(drainUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            event: ev.event_type,
+            devUserId: ev.devUserId,
+            roomId: ev.roomId,
+            bytesIn: ev.bytesIn,
+            bytesOut: ev.bytesOut,
+            peerCount: ev.peerCount,
+            ts: Date.now(),
+            ...(ev.extra ?? {}),
+          }),
+        }).catch((err) => {
+          console.log(
+            JSON.stringify({
+              event: "log_drain_post_error",
+              error: String((err as Error).message ?? err),
+            }),
+          );
+        }),
+      );
     }
   }
 }
