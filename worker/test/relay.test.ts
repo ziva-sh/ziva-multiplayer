@@ -1,34 +1,107 @@
 // End-to-end tests for the relay against the real Workers runtime.
+//
+// All assertions speak Godot's WebSocketMultiplayerPeer binary protocol —
+// 4-byte LE peer_id handshake, SYS_COMMAND_ADD_PEER / DEL_PEER announcements,
+// SYS_COMMAND_RELAY with sender_id rewriting. See src/proto/v1.ts.
 
 import { env, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import type { RoomDO } from "../src/room-do";
-import { UpgradeFailure, connect, readWelcome } from "./helpers";
+import {
+  SYS_COMMAND_ADD_PEER,
+  SYS_COMMAND_DEL_PEER,
+  UpgradeFailure,
+  buildRelayPacket,
+  connect,
+  parseRelayPacket,
+  parseSysPeerPacket,
+  readPeerId,
+} from "./helpers";
+
+void UpgradeFailure;
 
 describe("relay", () => {
-  it("broadcasts A -> B within 100 ms with valid JWTs", async () => {
-    const rid = `room-broadcast-${crypto.randomUUID()}`;
+  it("assigns peer_id 2 to the first joiner via the 4-byte handshake", async () => {
+    const rid = `room-handshake-${crypto.randomUUID()}`;
+    const a = await connect({ rid, sub: "user-a" });
+
+    const idA = await readPeerId(a);
+    // Server is the implicit id=1; first real client gets id=2.
+    expect(idA).toBe(2);
+
+    a.ws.close();
+  });
+
+  it("relays a unicast SYS_COMMAND_RELAY from A to B with sender_id rewritten", async () => {
+    const rid = `room-relay-${crypto.randomUUID()}`;
     const a = await connect({ rid, sub: "user-a" });
     const b = await connect({ rid, sub: "user-b" });
 
-    expect((await readWelcome(a)).peer_id).toBe(1);
-    expect((await readWelcome(b)).peer_id).toBe(2);
+    const idA = await readPeerId(a);
+    const idB = await readPeerId(b);
+    expect(idA).toBe(2);
+    expect(idB).toBe(3);
 
-    const bData = b.next(500);
+    // Drain the ADD_PEER chatter from join order: A gets ADD_PEER(B); B gets
+    // ADD_PEER(A) at join time.
+    const aJoinNotice = await a.next(500);
+    expect(parseSysPeerPacket(aJoinNotice, SYS_COMMAND_ADD_PEER)).toBe(idB);
+    const bExistingPeer = await b.next(500);
+    expect(parseSysPeerPacket(bExistingPeer, SYS_COMMAND_ADD_PEER)).toBe(idA);
+
+    // A sends a RELAY targeting B with an opaque inner payload.
+    const inner = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
+    const recvB = b.next(500);
     const start = Date.now();
-    a.ws.send(JSON.stringify({ type: "data", payload: { hello: "world" } }));
-    const raw = await bData;
-    const elapsed = Date.now() - start;
-    expect(elapsed).toBeLessThan(100);
+    a.ws.send(buildRelayPacket(idB, inner));
+    const raw = await recvB;
+    expect(Date.now() - start).toBeLessThan(100);
 
-    const envObj = JSON.parse(raw) as Record<string, unknown>;
-    expect(envObj.type).toBe("data");
-    expect(envObj.from).toBe(1);
-    expect(envObj.payload).toEqual({ hello: "world" });
+    const parsed = parseRelayPacket(raw);
+    expect(parsed.senderId).toBe(idA);
+    expect(Array.from(parsed.innerPayload)).toEqual(Array.from(inner));
 
     a.ws.close();
     b.ws.close();
+  });
+
+  it("broadcasts SYS_COMMAND_RELAY target=0 to all peers except sender", async () => {
+    const rid = `room-broadcast-${crypto.randomUUID()}`;
+    const a = await connect({ rid, sub: "user-a" });
+    const b = await connect({ rid, sub: "user-b" });
+    const c = await connect({ rid, sub: "user-c" });
+
+    const idA = await readPeerId(a);
+    const idB = await readPeerId(b);
+    const idC = await readPeerId(c);
+
+    // Drain join chatter. A: ADD_PEER(B), ADD_PEER(C). B: ADD_PEER(A) (its
+    // existing-peer notification from join), ADD_PEER(C) (C joining after).
+    // C: ADD_PEER(A), ADD_PEER(B) at join time.
+    await a.next(500);
+    await a.next(500);
+    await b.next(500);
+    await b.next(500);
+    await c.next(500);
+    await c.next(500);
+
+    const inner = new Uint8Array([0x01, 0x02, 0x03]);
+    const recvB = b.next(500);
+    const recvC = c.next(500);
+    a.ws.send(buildRelayPacket(0, inner));
+
+    const [bFrame, cFrame] = await Promise.all([recvB, recvC]);
+    const bp = parseRelayPacket(bFrame);
+    const cp = parseRelayPacket(cFrame);
+    expect(bp.senderId).toBe(idA);
+    expect(cp.senderId).toBe(idA);
+    expect(Array.from(bp.innerPayload)).toEqual([0x01, 0x02, 0x03]);
+    expect(Array.from(cp.innerPayload)).toEqual([0x01, 0x02, 0x03]);
+
+    a.ws.close();
+    b.ws.close();
+    c.ws.close();
   });
 
   it("rejects invalid JWT with HTTP 401", async () => {
@@ -73,7 +146,7 @@ describe("relay", () => {
     const sockets: WebSocket[] = [];
     for (let i = 0; i < 32; i++) {
       const c = await connect({ rid, sub: `user-${i}` });
-      await readWelcome(c);
+      await readPeerId(c);
       sockets.push(c.ws);
     }
 
@@ -85,55 +158,58 @@ describe("relay", () => {
     for (const ws of sockets) ws.close();
   });
 
-  it("broadcasts peer_join to existing peers when a new peer connects", async () => {
+  it("sends SYS_COMMAND_ADD_PEER to existing peers when a new peer connects", async () => {
     const rid = `room-pjoin-${crypto.randomUUID()}`;
     const a = await connect({ rid, sub: "pjoin-a" });
-    expect((await readWelcome(a)).peer_id).toBe(1);
+    const idA = await readPeerId(a);
+    expect(idA).toBe(2);
 
-    // While a is alone there is no traffic. Once b connects, a should see a
-    // peer_join envelope tagged with b's peer id.
+    // While a is alone there is no traffic. Once b connects, a should see
+    // an ADD_PEER frame announcing b's id.
     const aNext = a.next(500);
     const b = await connect({ rid, sub: "pjoin-b" });
-    expect((await readWelcome(b)).peer_id).toBe(2);
+    const idB = await readPeerId(b);
+    expect(idB).toBe(3);
 
-    const aRaw = await aNext;
-    const aEnv = JSON.parse(aRaw) as Record<string, unknown>;
-    expect(aEnv.type).toBe("peer_join");
-    expect(aEnv.peer_id).toBe(2);
+    const aFrame = await aNext;
+    expect(parseSysPeerPacket(aFrame, SYS_COMMAND_ADD_PEER)).toBe(idB);
+
+    // B should also have received an ADD_PEER announcing A as the existing peer.
+    const bExisting = await b.next(500);
+    expect(parseSysPeerPacket(bExisting, SYS_COMMAND_ADD_PEER)).toBe(idA);
 
     a.ws.close();
     b.ws.close();
   });
 
-  it("broadcasts peer_leave to remaining peers when one disconnects", async () => {
+  it("broadcasts SYS_COMMAND_DEL_PEER to remaining peers when one disconnects", async () => {
     const rid = `room-pleave-${crypto.randomUUID()}`;
     const a = await connect({ rid, sub: "pleave-a" });
     const b = await connect({ rid, sub: "pleave-b" });
-    expect((await readWelcome(a)).peer_id).toBe(1);
-    expect((await readWelcome(b)).peer_id).toBe(2);
-    // Drain the peer_join envelope a got when b connected.
-    const join = JSON.parse(await a.next(500)) as Record<string, unknown>;
-    expect(join.type).toBe("peer_join");
+    const idA = await readPeerId(a);
+    const idB = await readPeerId(b);
+
+    // Drain a's ADD_PEER(b) and b's ADD_PEER(a).
+    expect(parseSysPeerPacket(await a.next(500), SYS_COMMAND_ADD_PEER)).toBe(idB);
+    expect(parseSysPeerPacket(await b.next(500), SYS_COMMAND_ADD_PEER)).toBe(idA);
 
     const aNext = a.next(500);
     b.ws.close(1000, "bye");
     await b.closed;
-    const aRaw = await aNext;
-    const aEnv = JSON.parse(aRaw) as Record<string, unknown>;
-    expect(aEnv.type).toBe("peer_leave");
-    expect(aEnv.peer_id).toBe(2);
+    const aFrame = await aNext;
+    expect(parseSysPeerPacket(aFrame, SYS_COMMAND_DEL_PEER)).toBe(idB);
 
     a.ws.close();
   });
 
-  it("assigns peer ids 1, 2, 3 in order", async () => {
+  it("assigns peer ids 2, 3, 4 in order (id=1 is the implicit server)", async () => {
     const rid = `room-ids-${crypto.randomUUID()}`;
     const c1 = await connect({ rid, sub: "u1" });
-    expect((await readWelcome(c1)).peer_id).toBe(1);
+    expect(await readPeerId(c1)).toBe(2);
     const c2 = await connect({ rid, sub: "u2" });
-    expect((await readWelcome(c2)).peer_id).toBe(2);
+    expect(await readPeerId(c2)).toBe(3);
     const c3 = await connect({ rid, sub: "u3" });
-    expect((await readWelcome(c3)).peer_id).toBe(3);
+    expect(await readPeerId(c3)).toBe(4);
     c1.ws.close();
     c2.ws.close();
     c3.ws.close();
@@ -142,10 +218,12 @@ describe("relay", () => {
   it("closes a peer that sends >60 msg/s with 1008 within 1s", async () => {
     const rid = `room-rate-${crypto.randomUUID()}`;
     const a = await connect({ rid, sub: "rate-a" });
-    await readWelcome(a);
+    await readPeerId(a);
 
     const start = Date.now();
-    const payload = JSON.stringify({ type: "data", payload: "x" });
+    // Send a valid RELAY frame at high rate so we exercise the rate limit
+    // path, not the unknown-packet drop path.
+    const payload = buildRelayPacket(0, new Uint8Array([0x00]));
     for (let i = 0; i < 70; i++) {
       try {
         a.ws.send(payload);
@@ -170,8 +248,11 @@ describe("relay", () => {
     const rid = `room-hib-${crypto.randomUUID()}`;
     const a = await connect({ rid, sub: "hib-a" });
     const b = await connect({ rid, sub: "hib-b" });
-    await readWelcome(a);
-    await readWelcome(b);
+    const idA = await readPeerId(a);
+    const idB = await readPeerId(b);
+    // Drain join chatter.
+    await a.next(500);
+    await b.next(500);
 
     await new Promise((r) => setTimeout(r, 1000));
 
@@ -181,13 +262,13 @@ describe("relay", () => {
       expect(state.getWebSockets().length).toBe(2);
     });
 
-    const bData = b.next(500);
-    a.ws.send(JSON.stringify({ type: "data", payload: "post-idle" }));
-    const raw = await bData;
-    const envObj = JSON.parse(raw) as Record<string, unknown>;
-    expect(envObj.type).toBe("data");
-    expect(envObj.from).toBe(1);
-    expect(envObj.payload).toBe("post-idle");
+    const inner = new Uint8Array([0xaa, 0xbb, 0xcc]);
+    const recvB = b.next(500);
+    a.ws.send(buildRelayPacket(idB, inner));
+    const raw = await recvB;
+    const parsed = parseRelayPacket(raw);
+    expect(parsed.senderId).toBe(idA);
+    expect(Array.from(parsed.innerPayload)).toEqual([0xaa, 0xbb, 0xcc]);
 
     a.ws.close();
     b.ws.close();
@@ -197,8 +278,8 @@ describe("relay", () => {
     const rid = `room-cleanup-${crypto.randomUUID()}`;
     const a = await connect({ rid, sub: "cleanup-a" });
     const b = await connect({ rid, sub: "cleanup-b" });
-    await readWelcome(a);
-    await readWelcome(b);
+    await readPeerId(a);
+    await readPeerId(b);
 
     // Capture console.log emissions so we can assert "room_closed" fired.
     const logs: string[] = [];

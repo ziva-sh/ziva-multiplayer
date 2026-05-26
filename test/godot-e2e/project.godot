@@ -1,0 +1,18 @@
+; Minimal project for the headless e2e canary. Two entry-point scenes
+; (host.tscn / client.tscn) wrap host.gd / client.gd as the main scene so
+; their @rpc decorators get resolved correctly — @rpc requires the script
+; to be on a real Node inside the SceneTree.
+
+config_version=5
+
+[application]
+
+config/name="ziva-multiplayer-godot-e2e"
+config/features=PackedStringArray("4.5")
+
+[network]
+
+limits/debugger/max_chars_per_second=2147483647
+limits/debugger/max_queued_messages=2147483647
+limits/debugger/max_errors_per_second=2147483647
+limits/debugger/max_warnings_per_second=2147483647

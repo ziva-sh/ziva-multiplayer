@@ -1,0 +1,44 @@
+name: Headless Godot E2E
+
+# Real-Godot canary against the staged relay. Catches Godot protocol drift
+# the vitest mock can't see — if a future Godot release changes the wire
+# protocol of WebSocketMultiplayerPeer, this is the test that fails first.
+
+on:
+  schedule:
+    # Every 12 hours — 2 runs/day so a Godot regression is obvious within
+    # one cycle while keeping the staging worker invocation count low.
+    - cron: "0 */12 * * *"
+  workflow_dispatch:
+
+jobs:
+  godot-e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Install Godot (4.5 stable)
+        # Pinned to 4.5.x — the wire protocol we test against is stable as of
+        # 4.5 (see modules/websocket/websocket_multiplayer_peer.cpp). When
+        # bumping, re-run this test against the new version first.
+        run: |
+          set -euo pipefail
+          GODOT_VERSION="4.5-stable"
+          GODOT_ZIP="Godot_v${GODOT_VERSION}_linux.x86_64.zip"
+          curl -fSL "https://github.com/godotengine/godot-builds/releases/download/${GODOT_VERSION}/${GODOT_ZIP}" -o "$GODOT_ZIP"
+          unzip -q "$GODOT_ZIP"
+          sudo mv "Godot_v${GODOT_VERSION}_linux.x86_64" /usr/local/bin/godot
+          sudo chmod +x /usr/local/bin/godot
+          godot --version
+
+      - name: Run headless-Godot e2e
+        env:
+          ZIVA_RELAY_URL_E2E: ${{ secrets.STAGING_RELAY_URL }}
+          ZIVA_TOKEN_ENDPOINT_E2E: ${{ secrets.STAGING_TOKEN_ENDPOINT }}
+          E2E_USER_API_KEY: ${{ secrets.E2E_USER_API_KEY }}
+          STAGING_BYPASS_TOKEN: ${{ secrets.STAGING_BYPASS_TOKEN }}
+        run: bash test/godot-e2e/run-e2e.sh

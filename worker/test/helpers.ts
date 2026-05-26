@@ -2,11 +2,18 @@
 //
 // The Client connection pattern is intentionally specific: we attach the
 // message listener BEFORE calling ws.accept(). If we don't, the runtime can
-// deliver buffered server frames (like the welcome envelope) before the
-// listener is registered and the test will block forever waiting for them.
+// deliver buffered server frames (like the assigned-peer-id handshake) before
+// the listener is registered and the test will block forever waiting for them.
 
 import { SELF, env } from "cloudflare:test";
 import { SignJWT } from "jose";
+
+import {
+  NETWORK_COMMAND_SYS,
+  SYS_COMMAND_ADD_PEER,
+  SYS_COMMAND_DEL_PEER,
+  SYS_COMMAND_RELAY,
+} from "../src/proto/v1";
 
 export interface ClaimOverrides {
   sub?: string;
@@ -40,7 +47,8 @@ export interface ConnectOptions {
 
 export interface Connection {
   ws: WebSocket;
-  next(timeoutMs?: number): Promise<string>;
+  // Returns the next message as raw bytes. Throws on timeout.
+  next(timeoutMs?: number): Promise<Uint8Array>;
   closed: Promise<{ code: number; reason: string }>;
 }
 
@@ -75,10 +83,16 @@ export async function connect(opts: ConnectOptions = {}): Promise<Connection> {
   const ws = res.webSocket;
 
   // FIFO buffer + waiter queue so callers can `await next()` without races.
-  const buf: string[] = [];
-  const waiters: ((m: string) => void)[] = [];
+  const buf: Uint8Array[] = [];
+  const waiters: ((m: Uint8Array) => void)[] = [];
   ws.addEventListener("message", (ev) => {
-    const m = typeof ev.data === "string" ? ev.data : "<binary>";
+    // The Workers runtime delivers binary frames as ArrayBuffer; convert
+    // text frames (shouldn't happen with the binary protocol) into bytes
+    // so the test interface stays consistent.
+    const m =
+      typeof ev.data === "string"
+        ? new TextEncoder().encode(ev.data)
+        : new Uint8Array(ev.data as ArrayBuffer);
     const w = waiters.shift();
     if (w) w(m);
     else buf.push(m);
@@ -98,7 +112,7 @@ export async function connect(opts: ConnectOptions = {}): Promise<Connection> {
     ws,
     closed,
     next(timeoutMs = 500) {
-      return new Promise<string>((resolve, reject) => {
+      return new Promise<Uint8Array>((resolve, reject) => {
         if (buf.length > 0) {
           resolve(buf.shift()!);
           return;
@@ -108,7 +122,7 @@ export async function connect(opts: ConnectOptions = {}): Promise<Connection> {
           if (idx >= 0) waiters.splice(idx, 1);
           reject(new Error(`next() timeout after ${timeoutMs}ms`));
         }, timeoutMs);
-        const handler = (m: string) => {
+        const handler = (m: Uint8Array) => {
           clearTimeout(timer);
           resolve(m);
         };
@@ -118,19 +132,83 @@ export async function connect(opts: ConnectOptions = {}): Promise<Connection> {
   };
 }
 
-export interface WelcomeEnvelope {
-  type: "welcome";
-  peer_id: number;
-  protocol_version: 1;
+// Read the 4-byte handshake (LE int32 = assigned peer_id) off a freshly
+// connected socket. Throws if the first frame isn't 4 bytes.
+export async function readPeerId(c: Connection): Promise<number> {
+  const raw = await c.next(500);
+  if (raw.byteLength !== 4) {
+    throw new Error(
+      `expected 4-byte peer_id handshake, got ${raw.byteLength} bytes`,
+    );
+  }
+  return new DataView(raw.buffer, raw.byteOffset, raw.byteLength).getInt32(
+    0,
+    /* littleEndian */ true,
+  );
 }
 
-// Drains the welcome envelope off a freshly-connected socket. Every test
-// that cares about subsequent traffic must drain the welcome first.
-export async function readWelcome(c: Connection): Promise<WelcomeEnvelope> {
-  const raw = await c.next(500);
-  const env = JSON.parse(raw) as WelcomeEnvelope;
-  if (env.type !== "welcome") {
-    throw new Error(`expected welcome, got: ${raw}`);
+// Convenience: parse a SYS-with-peer-arg packet (ADD_PEER / DEL_PEER) and
+// return the announced peer id. Throws if the frame doesn't match.
+export function parseSysPeerPacket(
+  frame: Uint8Array,
+  expectedSubCommand: number,
+): number {
+  if (frame.byteLength < 6) {
+    throw new Error(`SYS peer packet too small: ${frame.byteLength}`);
   }
-  return env;
+  if ((frame[0] & 0x7) !== NETWORK_COMMAND_SYS) {
+    throw new Error(
+      `expected NETWORK_COMMAND_SYS, got cmd ${frame[0] & 0x7}`,
+    );
+  }
+  if (frame[1] !== expectedSubCommand) {
+    throw new Error(
+      `expected SYS sub-command ${expectedSubCommand}, got ${frame[1]}`,
+    );
+  }
+  return new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getInt32(
+    2,
+    /* littleEndian */ true,
+  );
 }
+
+// Build a binary SYS_COMMAND_RELAY packet the way a Godot client would.
+// `targetPeer` is 0 for broadcast, positive for unicast, negative for
+// all-except-N. The inner payload is opaque to the relay — tests pass an
+// arbitrary byte sequence to assert verbatim forwarding.
+export function buildRelayPacket(
+  targetPeer: number,
+  innerPayload: Uint8Array,
+  channel = 0,
+): Uint8Array {
+  const out = new Uint8Array(6 + innerPayload.byteLength);
+  out[0] = NETWORK_COMMAND_SYS | (channel << 5);
+  out[1] = SYS_COMMAND_RELAY;
+  new DataView(out.buffer).setInt32(2, targetPeer, /* littleEndian */ true);
+  out.set(innerPayload, 6);
+  return out;
+}
+
+// Parse the relay packet the server sends. Returns the sender_id rewritten
+// into the header and the inner payload bytes.
+export function parseRelayPacket(frame: Uint8Array): {
+  senderId: number;
+  innerPayload: Uint8Array;
+} {
+  if (frame.byteLength < 7) {
+    throw new Error(`relay packet too small: ${frame.byteLength}`);
+  }
+  if ((frame[0] & 0x7) !== NETWORK_COMMAND_SYS || frame[1] !== SYS_COMMAND_RELAY) {
+    throw new Error(
+      `expected SYS|RELAY header, got cmd=${frame[0] & 0x7} sub=${frame[1]}`,
+    );
+  }
+  const senderId = new DataView(
+    frame.buffer,
+    frame.byteOffset,
+    frame.byteLength,
+  ).getInt32(2, /* littleEndian */ true);
+  return { senderId, innerPayload: frame.subarray(6) };
+}
+
+export { SYS_COMMAND_ADD_PEER, SYS_COMMAND_DEL_PEER };
