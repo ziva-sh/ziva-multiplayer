@@ -1,0 +1,29 @@
+name = "ziva-multiplayer"
+main = "src/index.ts"
+compatibility_date = "2025-05-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Hibernation API requires the Durable Object to be class-bound and listed in
+# new_sqlite_classes so its state is durable across hibernation.
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "RoomDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomDO"]
+
+# Analytics Engine for usage metrics (peer connects, bytes in/out).
+# Wired in Phase 6; binding exists now so the DO can write to it from day one.
+[[analytics_engine_datasets]]
+binding = "MULTIPLAYER_EVENTS"
+dataset = "ziva_multiplayer_events"
+
+# KV namespace for soft/hard cap throttling. Populated by Phase 6.
+# Placeholder id — Phase 3 replaces with the real namespace id before deploy.
+[[kv_namespaces]]
+binding = "CAPS_KV"
+id = "placeholder_replace_in_phase_3"
+
+# MULTIPLAYER_JWT_SECRET is a secret (wrangler secret put), not a [vars] entry.
+# Local tests read it from .dev.vars (gitignored).

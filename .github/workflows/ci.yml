@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: worker
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Generate worker types
+        run: bun run types
+
+      - name: Typecheck
+        # `bun run typecheck` re-runs `wrangler types`; that's fine, idempotent.
+        run: bunx tsc --noEmit
+
+      - name: Test
+        env:
+          # CI doesn't have a .dev.vars file; supply the secret in the
+          # environment so vitest-pool-workers can read it. Value is arbitrary
+          # because tests sign and verify with the same secret.
+          MULTIPLAYER_JWT_SECRET: "ci-test-secret-not-used-in-prod"
+        run: bun run test
