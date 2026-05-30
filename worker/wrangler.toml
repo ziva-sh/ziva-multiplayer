@@ -14,11 +14,9 @@ tag = "v1"
 new_sqlite_classes = ["RoomDO"]
 
 # Analytics Engine for usage metrics (peer connects, bytes in/out).
-# REQUIRES one-time account enablement; see env.staging.analytics_engine_datasets
-# comment below for details. Re-enable once Bob clicks the dashboard button.
-# [[analytics_engine_datasets]]
-# binding = "MULTIPLAYER_EVENTS"
-# dataset = "ziva_multiplayer_events"
+[[analytics_engine_datasets]]
+binding = "MULTIPLAYER_EVENTS"
+dataset = "multiplayer"
 
 # KV namespace for soft/hard cap throttling. Populated by Phase 6.
 # Placeholder id — Phase 3 replaces with the real namespace id before deploy.
@@ -44,17 +42,11 @@ class_name = "RoomDO"
 tag = "v1"
 new_sqlite_classes = ["RoomDO"]
 
-# Analytics Engine — staging dataset. Phase 6 wires the rollup cron that reads
-# from this dataset via the CF SQL API.
-#
-# REQUIRES one-time per-account enablement at:
-#   https://dash.cloudflare.com/ace16bc379f57059ee9b9afd2df8b99a/workers/analytics-engine
-# (Bob has to click the green "Enable" button — the OAuth wrangler token
-# can't enable AE programmatically, only consume it once enabled.)
-# After enabling, uncomment the binding and re-run `wrangler deploy --env staging`.
-# [[env.staging.analytics_engine_datasets]]
-# binding = "MULTIPLAYER_EVENTS"
-# dataset = "ziva_multiplayer_events_staging"
+# Analytics Engine — staging writes to the same dataset as prod; rollup cron
+# filters by environment if needed.
+[[env.staging.analytics_engine_datasets]]
+binding = "MULTIPLAYER_EVENTS"
+dataset = "multiplayer"
 
 [[env.staging.kv_namespaces]]
 binding = "CAPS_KV"
@@ -77,10 +69,9 @@ class_name = "RoomDO"
 tag = "v1"
 new_sqlite_classes = ["RoomDO"]
 
-# See env.staging.analytics_engine_datasets comment — same enablement required.
-# [[env.production.analytics_engine_datasets]]
-# binding = "MULTIPLAYER_EVENTS"
-# dataset = "ziva_multiplayer_events"
+[[env.production.analytics_engine_datasets]]
+binding = "MULTIPLAYER_EVENTS"
+dataset = "multiplayer"
 
 # Prod CAPS_KV must be created via `wrangler kv namespace create CAPS_KV --env production`
 # before first prod deploy and the id pasted here.
