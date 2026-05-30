@@ -73,11 +73,9 @@ new_sqlite_classes = ["RoomDO"]
 binding = "MULTIPLAYER_EVENTS"
 dataset = "multiplayer"
 
-# Prod CAPS_KV must be created via `wrangler kv namespace create CAPS_KV --env production`
-# before first prod deploy and the id pasted here.
 [[env.production.kv_namespaces]]
 binding = "CAPS_KV"
-id = "placeholder_create_before_prod_deploy"
+id = "fbc3ed699aa546e5bbf905cdf9963821"
 
 [env.production.vars]
 LOG_DRAIN_URL = ""
