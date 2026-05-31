@@ -13,26 +13,29 @@ Current version: **1**.
 
 ## Authentication
 
-Clients present a short-lived HS256 JWT in the `?token=<jwt>` query parameter.
-The token is issued by the Ziva web app and signed with `MULTIPLAYER_JWT_SECRET`.
+There is no token. Clients identify themselves with two public query
+parameters on the upgrade URL:
 
-### Claims
+| Param | Type   | Meaning                                                      |
+|-------|--------|-------------------------------------------------------------|
+| `u`   | string | Dev user id — the Ziva account that owns and is billed.      |
+| `g`   | string | Game id — stable per project, scopes connection-rate limits. |
 
-| Claim | Type   | Meaning                                              |
-|-------|--------|------------------------------------------------------|
-| `sub` | string | Dev user id (the Ziva account that owns the room).   |
-| `rid` | string | Room id. Determines which `RoomDO` instance handles. |
-| `tier`| string | Subscription tier at issuance time.                  |
-| `iat` | number | Issued-at (seconds since epoch).                     |
-| `exp` | number | Expiry (seconds since epoch). 15 min default TTL.    |
+The room id comes from the `/r/<room>` path segment, not a query param.
 
-A token that fails verification (bad signature, expired, missing claims) is
-rejected with HTTP `401` at the upgrade — the WebSocket is never established.
+These values are not secrets; they say *which* account a connection belongs
+to. On each upgrade the Worker bounds raw attempts with `ConnRateDO` (per-IP
+and per-`(u,g)`), then asks the Ziva web app `GET /api/multiplayer/check?u=<u>`
+whether that account may connect (subscribed tier, multiplayer enabled, under
+its bandwidth cap). A denied or unavailable check rejects the upgrade with WS
+close code `1008` — the WebSocket is accepted then immediately closed, never
+fully established. Missing `u`, `g`, or room → `1008` `missing_params`.
 
 ## Connection lifecycle
 
-1. Client opens `wss://relay.ziva.sh/?token=<jwt>&v=1`.
-2. Worker verifies the JWT and forwards to the `RoomDO` named by `rid`.
+1. Client opens `<relay_url>/r/<room>?u=<user_id>&g=<game_id>&v=1`.
+2. Worker checks access (see Authentication) and forwards to the `RoomDO`
+   named by the room id.
 3. RoomDO assigns the next monotonic `peer_id` (starting at 1) and accepts
    the socket via the Hibernation API.
 4. Server sends a `welcome` envelope to the new peer.
@@ -93,10 +96,14 @@ JSON `data` envelopes.
 
 ## Close codes
 
-| Code | Reason                          | Meaning                                          |
-|------|---------------------------------|--------------------------------------------------|
-| 1000 | normal_closure                  | Peer disconnected cleanly.                       |
-| 1008 | unsupported_protocol_version    | `?v` does not match a server-supported major.    |
-| 1008 | room_full                       | Room is at its 32-peer cap.                      |
-| 1008 | rate_limit_exceeded             | Sender exceeded per-connection rate limit.       |
-| 1011 | internal_error                  | Server-side bug.                                 |
+| Code | Reason                          | Meaning                                            |
+|------|---------------------------------|----------------------------------------------------|
+| 1000 | normal_closure                  | Peer disconnected cleanly.                         |
+| 1008 | unsupported_protocol_version    | `?v` does not match a server-supported major.      |
+| 1008 | missing_params                  | Upgrade URL lacks `u`, `g`, or a `/r/<room>` path. |
+| 1008 | rate_limited                    | Connection attempts exceeded the per-IP/`(u,g)` cap. |
+| 1008 | not_allowed                     | Account check denied (tier, disabled, or capped).  |
+| 1008 | check_unavailable               | Access check failed with no last-good (fail closed). |
+| 1008 | room_full                       | Room is at its 32-peer cap.                        |
+| 1008 | rate_limit_exceeded             | Sender exceeded per-connection message rate limit. |
+| 1011 | internal_error                  | Server-side bug.                                   |

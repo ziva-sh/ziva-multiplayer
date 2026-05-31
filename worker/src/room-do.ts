@@ -15,7 +15,6 @@
 
 import { DurableObject } from "cloudflare:workers";
 
-import { CapState, THROTTLED_BYTES_PER_SEC } from "./cap-state";
 import {
   addPeerPacket,
   assignedPeerId,
@@ -38,14 +37,12 @@ const RATE_WINDOW_MS = 1000;
 interface SocketMeta {
   peerId: number;
   devUserId: string;
+  gameId: string;
   roomId: string;
   // Sliding window for rate limiting. Reset whenever windowStart is >1s ago.
   windowStart: number;
   windowMsgs: number;
   windowBytes: number;
-  // Per-connection byte-budget; lowered to THROTTLED_BYTES_PER_SEC when the
-  // owner devUserId is in the throttle set.
-  byteBudget: number;
   // Cumulative bytes routed FOR THIS CONNECTION, both directions. Emitted on
   // close so the rollup cron can attribute totals to the right user. Snapshot
   // is bounded by AE write rate so we only emit per-window aggregates, not
@@ -55,22 +52,11 @@ interface SocketMeta {
 }
 
 export class RoomDO extends DurableObject<Env> {
-  private capState: CapState | null;
   private roomId = "";
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    // env.CAPS_KV is optional in local/test envs that don't bind it. When
-    // absent we treat no user as throttled (the cap check still happens in
-    // the JWT issuer).
-    this.capState = env.CAPS_KV ? new CapState(env.CAPS_KV) : null;
     ctx.blockConcurrencyWhile(async () => {
-      // Prime the throttle cache before accepting connections so the first
-      // fetch() sees authoritative state. The DO will not handle any
-      // requests until this resolves.
-      if (this.capState) {
-        await this.capState.refresh();
-      }
       // peer_counter is the source of truth for next peer id assignment.
       // It's monotonic across hibernation; we never reuse ids. Starts at 1
       // because the server is the implicit id=1 in Godot's model; the first
@@ -101,8 +87,9 @@ export class RoomDO extends DurableObject<Env> {
     }
 
     const devUserId = request.headers.get("X-Ziva-Sub");
+    const gameId = request.headers.get("X-Ziva-Game");
     const roomId = request.headers.get("X-Ziva-Rid");
-    if (!devUserId || !roomId) {
+    if (!devUserId || !gameId || !roomId) {
       // Worker forgot to set the trusted headers — fail loudly so the bug
       // is obvious in dev. Should never happen in prod.
       return new Response("missing_trusted_headers", { status: 500 });
@@ -122,27 +109,17 @@ export class RoomDO extends DurableObject<Env> {
     const peerId = this.nextPeerId();
     const isFirstPeer = current === 0;
 
-    // Check throttle status BEFORE accepting the socket — if the user blew
-    // their hard cap the JWT issuer should already 403, so this is a defense
-    // in depth (the KV-cached set may be stale by minutes).
-    if (this.capState) {
-      this.capState.isThrottled(devUserId); // primes the cache
-    }
-    const throttled =
-      this.capState !== null && this.capState.isThrottled(devUserId);
-    const byteBudget = throttled ? THROTTLED_BYTES_PER_SEC : RATE_LIMIT_BYTES_PER_SEC;
-
     const pair = new WebSocketPair();
     const server = pair[1];
 
     const meta: SocketMeta = {
       peerId,
       devUserId,
+      gameId,
       roomId,
       windowStart: Date.now(),
       windowMsgs: 0,
       windowBytes: 0,
-      byteBudget,
       totalBytesIn: 0,
       totalBytesOut: 0,
     };
@@ -180,6 +157,7 @@ export class RoomDO extends DurableObject<Env> {
       this.emitEvent({
         event_type: "room_created",
         devUserId,
+        gameId,
         roomId,
         bytesIn: 0,
         bytesOut: 0,
@@ -189,11 +167,12 @@ export class RoomDO extends DurableObject<Env> {
     this.emitEvent({
       event_type: "peer_joined",
       devUserId,
+      gameId,
       roomId,
       bytesIn: 0,
       bytesOut: 0,
       peerCount: this.ctx.getWebSockets().length,
-      extra: { peerId, throttled },
+      extra: { peerId },
     });
 
     return new Response(null, { status: 101, webSocket: pair[0] });
@@ -225,16 +204,17 @@ export class RoomDO extends DurableObject<Env> {
 
     if (
       meta.windowMsgs > RATE_LIMIT_MSGS_PER_SEC ||
-      meta.windowBytes > meta.byteBudget
+      meta.windowBytes > RATE_LIMIT_BYTES_PER_SEC
     ) {
       this.emitEvent({
         event_type: "rate_limit_hit",
         devUserId: meta.devUserId,
+        gameId: meta.gameId,
         roomId: meta.roomId,
         bytesIn: byteSize,
         bytesOut: 0,
         peerCount: this.ctx.getWebSockets().length,
-        extra: { peerId: meta.peerId, budget: meta.byteBudget },
+        extra: { peerId: meta.peerId, budget: RATE_LIMIT_BYTES_PER_SEC },
       });
       ws.serializeAttachment(meta);
       ws.close(1008, "rate_limit_exceeded");
@@ -248,6 +228,7 @@ export class RoomDO extends DurableObject<Env> {
       this.emitEvent({
         event_type: "text_frame_dropped",
         devUserId: meta.devUserId,
+        gameId: meta.gameId,
         roomId: meta.roomId,
         bytesIn: byteSize,
         bytesOut: 0,
@@ -309,6 +290,7 @@ export class RoomDO extends DurableObject<Env> {
       this.emitEvent({
         event_type: "relay",
         devUserId: meta.devUserId,
+        gameId: meta.gameId,
         roomId: meta.roomId,
         bytesIn: byteSize,
         bytesOut: bytesOutTotal,
@@ -339,6 +321,7 @@ export class RoomDO extends DurableObject<Env> {
       this.emitEvent({
         event_type: "auth",
         devUserId: meta.devUserId,
+        gameId: meta.gameId,
         roomId: meta.roomId,
         bytesIn: byteSize,
         bytesOut: bytesOutTotal,
@@ -356,6 +339,7 @@ export class RoomDO extends DurableObject<Env> {
     this.emitEvent({
       event_type: "unknown_packet_dropped",
       devUserId: meta.devUserId,
+      gameId: meta.gameId,
       roomId: meta.roomId,
       bytesIn: byteSize,
       bytesOut: 0,
@@ -401,6 +385,7 @@ export class RoomDO extends DurableObject<Env> {
       this.emitEvent({
         event_type: "peer_left",
         devUserId: meta.devUserId,
+        gameId: meta.gameId,
         roomId: meta.roomId,
         bytesIn: meta.totalBytesIn,
         bytesOut: meta.totalBytesOut,
@@ -423,6 +408,7 @@ export class RoomDO extends DurableObject<Env> {
       this.emitEvent({
         event_type: "peer_error",
         devUserId: meta.devUserId,
+        gameId: meta.gameId,
         roomId: meta.roomId,
         bytesIn: 0,
         bytesOut: 0,
@@ -457,6 +443,7 @@ export class RoomDO extends DurableObject<Env> {
       this.emitEvent({
         event_type: "room_closed",
         devUserId: "",
+        gameId: "",
         roomId: this.roomId,
         bytesIn: 0,
         bytesOut: 0,
@@ -468,6 +455,7 @@ export class RoomDO extends DurableObject<Env> {
   private emitEvent(ev: {
     event_type: string;
     devUserId: string;
+    gameId: string;
     roomId: string;
     bytesIn: number;
     bytesOut: number;
@@ -479,6 +467,7 @@ export class RoomDO extends DurableObject<Env> {
       JSON.stringify({
         event: ev.event_type,
         devUserId: ev.devUserId,
+        gameId: ev.gameId,
         roomId: ev.roomId,
         bytesIn: ev.bytesIn,
         bytesOut: ev.bytesOut,
@@ -491,6 +480,7 @@ export class RoomDO extends DurableObject<Env> {
     //   blobs[0]: event_type
     //   blobs[1]: devUserId  (the user being billed)
     //   blobs[2]: roomId
+    //   blobs[3]: game_id    (which game the traffic belongs to)
     //   doubles[0]: bytesIn
     //   doubles[1]: bytesOut
     //   doubles[2]: peerCount
@@ -504,7 +494,7 @@ export class RoomDO extends DurableObject<Env> {
     if (events) {
       try {
         events.writeDataPoint({
-          blobs: [ev.event_type, ev.devUserId, ev.roomId],
+          blobs: [ev.event_type, ev.devUserId, ev.roomId, ev.gameId],
           doubles: [ev.bytesIn, ev.bytesOut, ev.peerCount],
           indexes: [ev.devUserId],
         });
@@ -531,6 +521,7 @@ export class RoomDO extends DurableObject<Env> {
           body: JSON.stringify({
             event: ev.event_type,
             devUserId: ev.devUserId,
+            gameId: ev.gameId,
             roomId: ev.roomId,
             bytesIn: ev.bytesIn,
             bytesOut: ev.bytesOut,

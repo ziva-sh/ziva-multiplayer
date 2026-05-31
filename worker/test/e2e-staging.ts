@@ -2,22 +2,19 @@
 //
 // Uses Godot's WebSocketMultiplayerPeer binary protocol — same wire format
 // the headless-Godot e2e test exercises but via Bun's `ws` client. Proves:
-//   1. JWT issuer (apps/web) hands out tokens for the staging relay URL
-//   2. Both clients successfully upgrade against the live Worker (real TLS,
-//      real Cloudflare edge, real Durable Object)
-//   3. The 4-byte LE peer_id handshake arrives first
-//   4. SYS_COMMAND_ADD_PEER announcements fire on both directions
-//   5. SYS_COMMAND_RELAY round-trips with sender_id rewritten correctly
+//   1. Both clients upgrade against the live Worker token-lessly (the Worker's
+//      lazy /check against staging apps/web returns allowed for E2E_USER_ID)
+//   2. The 4-byte LE peer_id handshake arrives first
+//   3. SYS_COMMAND_ADD_PEER announcements fire in both directions
+//   4. SYS_COMMAND_RELAY round-trips with sender_id rewritten correctly
 //
 // Required env:
-//   STAGING_RELAY_URL       e.g. ziva-multiplayer-staging.ziva-multiplayer.workers.dev
-//                           (no scheme — script prepends wss://)
-//   STAGING_TOKEN_ENDPOINT  e.g. https://staging.ziva.sh
-//   E2E_USER_API_KEY        Better-Auth API key for a basic-tier user with
-//                           multiplayerEnabled=true.
+//   STAGING_RELAY_URL  e.g. ziva-multiplayer-staging.ziva-multiplayer.workers.dev
+//                      (no scheme — script prepends wss://)
+//   E2E_USER_ID        a dev user id whose /api/multiplayer/check returns
+//                      { allowed: true } on staging apps/web.
 // Optional:
-//   STAGING_BYPASS_TOKEN    Vercel protection-bypass token for staging.ziva.sh.
-//                           Required if the deployment is behind Vercel SSO.
+//   E2E_GAME_ID        game id to report (default "e2e").
 
 import { WebSocket } from "ws";
 
@@ -36,41 +33,8 @@ function envOrThrow(name: string): string {
 }
 
 const RELAY_HOST = envOrThrow("STAGING_RELAY_URL").replace(/^wss?:\/\//, "");
-const TOKEN_ENDPOINT = envOrThrow("STAGING_TOKEN_ENDPOINT").replace(/\/+$/, "");
-const API_KEY = envOrThrow("E2E_USER_API_KEY");
-const BYPASS = process.env.STAGING_BYPASS_TOKEN ?? "";
-
-interface TokenResponse {
-  token: string;
-  relay_url: string;
-  room_id: string;
-  expires_at: number;
-  protocol_version: number;
-}
-
-async function fetchToken(roomId?: string): Promise<TokenResponse> {
-  // Bypass token can be passed either as a query string or a header. Header
-  // form is more robust because POST bodies don't survive a redirect.
-  const url = `${TOKEN_ENDPOINT}/api/multiplayer/token`;
-  const headers: Record<string, string> = {
-    "x-api-key": API_KEY,
-    "Content-Type": "application/json",
-  };
-  if (BYPASS) headers["x-vercel-protection-bypass"] = BYPASS;
-  if (BYPASS) headers["x-vercel-set-bypass-cookie"] = "true";
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(roomId ? { room_id: roomId } : {}),
-  });
-  if (!res.ok) {
-    throw new Error(
-      `Token endpoint returned ${res.status}: ${await res.text()}`,
-    );
-  }
-  return (await res.json()) as TokenResponse;
-}
+const USER_ID = envOrThrow("E2E_USER_ID");
+const GAME_ID = process.env.E2E_GAME_ID ?? "e2e";
 
 interface Client {
   ws: WebSocket;
@@ -79,8 +43,8 @@ interface Client {
   next: (timeoutMs?: number) => Promise<Buffer>;
 }
 
-function openClient(label: string, token: string, roomId: string): Promise<Client> {
-  const url = `wss://${RELAY_HOST}/r/${encodeURIComponent(roomId)}?token=${encodeURIComponent(token)}&v=1`;
+function openClient(label: string, roomId: string): Promise<Client> {
+  const url = `wss://${RELAY_HOST}/r/${encodeURIComponent(roomId)}?u=${encodeURIComponent(USER_ID)}&g=${encodeURIComponent(GAME_ID)}&v=1`;
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
     const buf: Buffer[] = [];
@@ -199,29 +163,20 @@ function parseSysPeerPacket(buf: Buffer, expectedSub: number): number {
 
 async function main() {
   console.log(`[e2e] relay=wss://${RELAY_HOST}`);
-  console.log(`[e2e] token endpoint=${TOKEN_ENDPOINT}/api/multiplayer/token`);
 
-  // Step 1: mint a token (lets the server pick a fresh room id), then mint
-  // a second token for the same room so both clients land on the same DO.
-  const t1 = await fetchToken();
-  const roomId = t1.room_id;
-  console.log(`[e2e] minted token for room=${roomId}`);
-  const t2 = await fetchToken(roomId);
-  console.log(`[e2e] minted second token for same room`);
+  // Pick a fresh room id so both clients land on the same DO without colliding
+  // with any other run.
+  const roomId = `e2e-${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+  console.log(`[e2e] room=${roomId} user=${USER_ID} game=${GAME_ID}`);
 
-  // Step 2: open both clients in parallel.
   const [a, b] = await Promise.all([
-    openClient("A", t1.token, roomId),
-    openClient("B", t2.token, roomId),
+    openClient("A", roomId),
+    openClient("B", roomId),
   ]);
   console.log(
     `[e2e] both clients connected; peer ids A=${a.peerId} B=${b.peerId}`,
   );
 
-  // Step 3: each client should receive an ADD_PEER announcement for the
-  // other. The order depends on which joined first (the second joiner gets
-  // an ADD_PEER for the first; the first gets an ADD_PEER for the second
-  // at the moment the second joins).
   const aAdd = await a.next(2000);
   const bAdd = await b.next(2000);
   const aHeardAbout = parseSysPeerPacket(aAdd, SYS_COMMAND_ADD_PEER);
@@ -238,7 +193,6 @@ async function main() {
   }
   console.log(`[e2e] both peers received ADD_PEER announcements`);
 
-  // Step 4: A -> B RELAY with sender_id rewrite.
   const innerAB = new Uint8Array([0xde, 0xad, 0xbe, 0xef]);
   const recvB = b.next(2000);
   const t0AB = Date.now();
@@ -256,7 +210,6 @@ async function main() {
   }
   console.log(`[e2e] A->B RELAY round-trip latency: ${dtAB}ms`);
 
-  // Step 5: B -> A RELAY in the other direction.
   const innerBA = new Uint8Array([0xca, 0xfe, 0xba, 0xbe]);
   const recvA = a.next(2000);
   const t0BA = Date.now();

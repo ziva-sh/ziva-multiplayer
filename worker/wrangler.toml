@@ -9,23 +9,30 @@ compatibility_flags = ["nodejs_compat"]
 name = "ROOM"
 class_name = "RoomDO"
 
+# ConnRateDO bounds raw connection attempts (per-IP and per-(u,g)) so the
+# no-negative-cache access check can't be turned into unbounded /check fan-out.
+[[durable_objects.bindings]]
+name = "CONN_RATE"
+class_name = "ConnRateDO"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["ConnRateDO"]
 
 # Analytics Engine for usage metrics (peer connects, bytes in/out).
 [[analytics_engine_datasets]]
 binding = "MULTIPLAYER_EVENTS"
 dataset = "multiplayer"
 
-# KV namespace for soft/hard cap throttling. Populated by Phase 6.
-# Placeholder id — Phase 3 replaces with the real namespace id before deploy.
-[[kv_namespaces]]
-binding = "CAPS_KV"
-id = "placeholder_replace_in_phase_3"
-
-# MULTIPLAYER_JWT_SECRET is a secret (wrangler secret put), not a [vars] entry.
-# Local tests read it from .dev.vars (gitignored).
+# Top-level vars are used by local `wrangler dev` and the vitest suite. The
+# tests stub this origin's /api/multiplayer/check via the Miniflare fetch mock.
+[vars]
+ZIVA_API_BASE = "http://localhost:3000"
+LOG_DRAIN_URL = ""
 
 # ---- Staging environment ----
 # Deployed via `wrangler deploy --env staging`. Hostname is the default
@@ -38,9 +45,17 @@ name = "ziva-multiplayer-staging"
 name = "ROOM"
 class_name = "RoomDO"
 
+[[env.staging.durable_objects.bindings]]
+name = "CONN_RATE"
+class_name = "ConnRateDO"
+
 [[env.staging.migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomDO"]
+
+[[env.staging.migrations]]
+tag = "v2"
+new_sqlite_classes = ["ConnRateDO"]
 
 # Analytics Engine — staging writes to the same dataset as prod; rollup cron
 # filters by environment if needed.
@@ -48,13 +63,11 @@ new_sqlite_classes = ["RoomDO"]
 binding = "MULTIPLAYER_EVENTS"
 dataset = "multiplayer"
 
-[[env.staging.kv_namespaces]]
-binding = "CAPS_KV"
-id = "05063c1c30b84492ac866e24de1cb36b"
-
-# LOG_DRAIN_URL is plain text — POSTed-to by room-do for structured events.
-# Empty default means "no log drain"; the Worker no-ops cleanly when unset.
+# ZIVA_API_BASE — apps/web origin the access check (/api/multiplayer/check)
+# hits. LOG_DRAIN_URL is plain text, POSTed-to by room-do for structured
+# events; empty means "no log drain" and the Worker no-ops cleanly.
 [env.staging.vars]
+ZIVA_API_BASE = "https://staging.ziva.sh"
 LOG_DRAIN_URL = ""
 
 # ---- Production environment ----
@@ -65,17 +78,22 @@ name = "ziva-multiplayer"
 name = "ROOM"
 class_name = "RoomDO"
 
+[[env.production.durable_objects.bindings]]
+name = "CONN_RATE"
+class_name = "ConnRateDO"
+
 [[env.production.migrations]]
 tag = "v1"
 new_sqlite_classes = ["RoomDO"]
+
+[[env.production.migrations]]
+tag = "v2"
+new_sqlite_classes = ["ConnRateDO"]
 
 [[env.production.analytics_engine_datasets]]
 binding = "MULTIPLAYER_EVENTS"
 dataset = "multiplayer"
 
-[[env.production.kv_namespaces]]
-binding = "CAPS_KV"
-id = "fbc3ed699aa546e5bbf905cdf9963821"
-
 [env.production.vars]
+ZIVA_API_BASE = "https://ziva.sh"
 LOG_DRAIN_URL = ""

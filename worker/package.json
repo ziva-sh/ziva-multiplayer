@@ -19,8 +19,5 @@
     "vitest": "~3.2.0",
     "wrangler": "^4.0.0",
     "ws": "^8.21.0"
-  },
-  "dependencies": {
-    "jose": "^5.9.6"
   }
 }

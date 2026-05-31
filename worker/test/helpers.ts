@@ -1,12 +1,11 @@
-// Shared test helpers — JWT minting and WebSocket plumbing.
+// Shared test helpers — /check stubbing and WebSocket plumbing.
 //
 // The Client connection pattern is intentionally specific: we attach the
 // message listener BEFORE calling ws.accept(). If we don't, the runtime can
 // deliver buffered server frames (like the assigned-peer-id handshake) before
 // the listener is registered and the test will block forever waiting for them.
 
-import { SELF, env } from "cloudflare:test";
-import { SignJWT } from "jose";
+import { SELF, env, fetchMock } from "cloudflare:test";
 
 import {
   NETWORK_COMMAND_SYS,
@@ -15,34 +14,51 @@ import {
   SYS_COMMAND_RELAY,
 } from "../src/proto/v1";
 
-export interface ClaimOverrides {
-  sub?: string;
-  rid?: string;
-  tier?: string;
-  ttlSeconds?: number;
+// The Worker's access check fetches `${ZIVA_API_BASE}/api/multiplayer/check`.
+// We mock that origin via Miniflare's fetch mock. Reading the origin from the
+// same binding the Worker uses guarantees the interceptor and the Worker can
+// never disagree.
+const CHECK_ORIGIN = env.ZIVA_API_BASE;
+
+function checkPathMatcher(userId: string): (path: string) => boolean {
+  // undici matches on path INCLUDING the query string. We match the exact
+  // user so concurrent tests with distinct users don't cross-talk.
+  return (path: string) =>
+    path.startsWith("/api/multiplayer/check") &&
+    path.includes(`u=${encodeURIComponent(userId)}`);
 }
 
-export async function mintJwt(overrides: ClaimOverrides = {}): Promise<string> {
-  const secret = new TextEncoder().encode(env.MULTIPLAYER_JWT_SECRET);
-  const now = Math.floor(Date.now() / 1000);
-  const ttl = overrides.ttlSeconds ?? 15 * 60;
-  return await new SignJWT({
-    sub: overrides.sub ?? "user-test",
-    rid: overrides.rid ?? "room-test",
-    tier: overrides.tier ?? "basic",
-  })
-    .setProtectedHeader({ alg: "HS256" })
-    .setIssuedAt(now)
-    .setExpirationTime(now + ttl)
-    .sign(secret);
+// Stub the NEXT /check call for `userId` to return {allowed}. One-shot by
+// default; multiple registrations for the same user are consumed FIFO so a
+// test can script "prime allowed, then refresh not-allowed".
+export function stubCheck(userId: string, allowed: boolean, times = 1): void {
+  fetchMock
+    .get(CHECK_ORIGIN)
+    .intercept({ method: "GET", path: checkPathMatcher(userId) })
+    .reply(200, { allowed })
+    .times(times);
+}
+
+// Stub the NEXT /check call for `userId` to fail at the transport layer
+// (simulates apps/web being unreachable / 5xx).
+export function stubCheckError(userId: string, times = 1): void {
+  fetchMock
+    .get(CHECK_ORIGIN)
+    .intercept({ method: "GET", path: checkPathMatcher(userId) })
+    .replyWithError(new Error("simulated check transport failure"))
+    .times(times);
 }
 
 export interface ConnectOptions {
   rid?: string;
-  sub?: string;
+  u?: string;
+  g?: string;
   v?: number | string;
-  token?: string;
-  ttlSeconds?: number;
+  ip?: string;
+  // When set, register a one-shot `/check → {allowed:true}` stub for `u`
+  // immediately before connecting. Most relay tests just want a working
+  // connection and don't care about the check; they leave this on.
+  stub?: boolean;
 }
 
 export interface Connection {
@@ -63,18 +79,29 @@ export class UpgradeFailure extends Error {
 
 export async function connect(opts: ConnectOptions = {}): Promise<Connection> {
   const rid = opts.rid ?? "room-test";
-  const sub = opts.sub ?? "user-test";
+  const u = opts.u ?? "user-test";
+  const g = opts.g ?? "game-test";
   const v = opts.v ?? 1;
-  const token =
-    opts.token ?? (await mintJwt({ rid, sub, ttlSeconds: opts.ttlSeconds }));
+  // Default to a unique IP per call so normal tests never contend on the
+  // shared per-IP connection-rate window. Rate-limit tests pin `ip` to make
+  // the window accumulate.
+  const ip = opts.ip ?? `ip-${crypto.randomUUID()}`;
+
+  if (opts.stub ?? true) {
+    stubCheck(u, true);
+  }
 
   const params = new URLSearchParams();
-  if (token !== "") params.set("token", token);
+  params.set("u", u);
+  params.set("g", g);
   params.set("v", String(v));
 
-  const res = await SELF.fetch(`http://relay.test/?${params.toString()}`, {
-    headers: { Upgrade: "websocket" },
-  });
+  const res = await SELF.fetch(
+    `http://relay.test/r/${encodeURIComponent(rid)}?${params.toString()}`,
+    {
+      headers: { Upgrade: "websocket", "CF-Connecting-IP": ip },
+    },
+  );
 
   if (res.status !== 101 || !res.webSocket) {
     throw new UpgradeFailure(res.status, await res.text());
