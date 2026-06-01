@@ -9,9 +9,10 @@ extends Node
 # real Node inside the SceneTree (required for RPC NodePath routing).
 #
 # Required env vars (set by run-e2e.sh):
-#   ZIVA_RELAY_URL         wss://<host>
+#   ZIVA_RELAY_URL         ws://<host> or wss://<host>
 #   ZIVA_ROOM_ID           shared room id (both processes use the same one)
-#   ZIVA_TOKEN_HOST        JWT for the host's session
+#   ZIVA_USER_ID           developer user id passed as ?u=
+#   ZIVA_GAME_ID           game id passed as ?g=
 
 const TIMEOUT_MS := 15000
 const ACK_WAIT_MS := 5000
@@ -26,8 +27,9 @@ func _ready() -> void:
 	_start_ms = Time.get_ticks_msec()
 	var relay_url := _env_or_die("ZIVA_RELAY_URL")
 	var room_id := _env_or_die("ZIVA_ROOM_ID")
-	var token := _env_or_die("ZIVA_TOKEN_HOST")
-	var url := "%s/r/%s?token=%s&v=1" % [relay_url, room_id, token]
+	var user_id := _env_or_die("ZIVA_USER_ID")
+	var game_id := _env_or_die("ZIVA_GAME_ID")
+	var url := "%s/r/%s?u=%s&g=%s&v=1" % [relay_url, room_id, user_id, game_id]
 	print("[host] connecting to %s" % url)
 
 	_peer = WebSocketMultiplayerPeer.new()
