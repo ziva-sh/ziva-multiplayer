@@ -5,7 +5,12 @@
 // — never per relayed message), bounds raw attempts with ConnRateDO, then
 // forwards the upgrade to the room DO. All non-WS requests get a 404.
 
-import { ConnRateDO } from "./conn-rate-do";
+import {
+  ConnRateDO,
+  CONN_RATE_LIMIT_PER_IP,
+  CONN_RATE_LIMIT_PER_UG,
+  CONN_RATE_WINDOW_MS,
+} from "./conn-rate-do";
 import { RoomDO } from "./room-do";
 
 export { ConnRateDO, RoomDO };
@@ -21,13 +26,6 @@ const POSITIVE_TTL_MS = 60_000;
 // /check is given a short edge cacheTtl so bursts of true-misses for the same
 // user collapse onto one origin hit.
 const CHECK_CACHE_TTL_SECONDS = 30;
-
-// Connection-rate caps. Coarse abuse bounds, NOT per-message rate limiting
-// (that lives in the room DO). Consulted once per upgrade. Exported so the
-// test suite can drive exactly past the cap.
-const CONN_RATE_WINDOW_MS = 60_000;
-export const CONN_RATE_LIMIT_PER_IP = 120;
-export const CONN_RATE_LIMIT_PER_UG = 30;
 
 // Isolate-global positive cache. There is intentionally NO negative cache:
 // a "not allowed" answer is never remembered, so an unsubscribe/resubscribe

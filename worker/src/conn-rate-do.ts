@@ -15,6 +15,15 @@
 
 import { DurableObject } from "cloudflare:workers";
 
+// Connection-rate caps. Coarse abuse bounds, NOT per-message rate limiting
+// (that lives in the room DO). Consulted once per upgrade. Defined here (not in
+// the worker entry) so they can be imported by both index.ts and the test
+// suite without the entry module exporting a non-handler value — workerd
+// rejects plain named exports from the entrypoint as invalid service bindings.
+export const CONN_RATE_WINDOW_MS = 60_000;
+export const CONN_RATE_LIMIT_PER_IP = 120;
+export const CONN_RATE_LIMIT_PER_UG = 30;
+
 export class ConnRateDO extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);

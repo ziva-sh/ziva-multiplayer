@@ -10,7 +10,7 @@
 import { SELF, env, fetchMock, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CONN_RATE_LIMIT_PER_UG } from "../src/index";
+import { CONN_RATE_LIMIT_PER_UG } from "../src/conn-rate-do";
 import type { RoomDO } from "../src/room-do";
 import {
   SYS_COMMAND_ADD_PEER,
