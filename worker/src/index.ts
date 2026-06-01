@@ -50,8 +50,15 @@ function acceptAndClose(code: number, reason: string): Response {
 // One /check round-trip. Throws on transport failure (caller decides how to
 // degrade); returns the boolean `allowed` on a clean response.
 async function fetchAllowed(env: Env, userId: string): Promise<boolean> {
+  // Staging apps/web sits behind Vercel deployment protection, so this
+  // server-to-server call must carry a protection-bypass token. The var is set
+  // ONLY on staging; prod apps/web is public, leaves it unset, and sends nothing.
+  const bypassToken = (env as { ZIVA_API_BYPASS?: string }).ZIVA_API_BYPASS;
+  const bypass = bypassToken
+    ? `&x-vercel-protection-bypass=${encodeURIComponent(bypassToken)}`
+    : "";
   const res = await fetch(
-    `${env.ZIVA_API_BASE}/api/multiplayer/check?u=${encodeURIComponent(userId)}`,
+    `${env.ZIVA_API_BASE}/api/multiplayer/check?u=${encodeURIComponent(userId)}${bypass}`,
     { cf: { cacheTtl: CHECK_CACHE_TTL_SECONDS } },
   );
   if (!res.ok) {
