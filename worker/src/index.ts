@@ -79,6 +79,30 @@ function json(data: unknown, init: ResponseInit = {}): Response {
   });
 }
 
+function withDiagnosticCors(response: Response): Response {
+  const headers = new Headers(response.headers);
+  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set("Access-Control-Allow-Methods", "GET, OPTIONS");
+  headers.set("Access-Control-Allow-Headers", "Content-Type");
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+function diagnosticOptions(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Cache-Control": "no-store",
+    },
+  });
+}
+
 function diagnosticMessage(reason: AccessReason): string {
   switch (reason) {
     case AccessReason.Ok:
@@ -297,7 +321,10 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname === "/diagnose") {
-      return diagnose(request, env);
+      if (request.method === "OPTIONS") {
+        return diagnosticOptions();
+      }
+      return withDiagnosticCors(await diagnose(request, env));
     }
 
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {

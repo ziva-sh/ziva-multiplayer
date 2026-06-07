@@ -200,9 +200,23 @@ describe("diagnose", () => {
 
     expect(res.status).toBe(200);
     expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(res.headers.get("Access-Control-Allow-Methods")).toContain("GET");
     expect(body.ok).toBe(false);
     expect(body.reason).toBe("multiplayer_disabled");
     expect(body.message).toContain("enable multiplayer");
+  });
+
+  it("handles browser preflight for relay diagnostics", async () => {
+    const res = await SELF.fetch("http://relay.test/diagnose", {
+      method: "OPTIONS",
+      headers: { Origin: "http://localhost:5173" },
+    });
+
+    expect(res.status).toBe(204);
+    expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
+    expect(res.headers.get("Access-Control-Allow-Methods")).toContain("OPTIONS");
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
   });
 
   it("returns ok:true when access is allowed", async () => {
