@@ -31,6 +31,25 @@ its bandwidth cap). A denied or unavailable check rejects the upgrade with WS
 close code `1008` — the WebSocket is accepted then immediately closed, never
 fully established. Missing `u`, `g`, or room → `1008` `missing_params`.
 
+For user-facing diagnostics, clients can call:
+
+```txt
+GET <relay_url>/diagnose?u=<user_id>&g=<game_id>&v=1
+```
+
+The response is not cached and returns an actionable reason/message:
+
+```json
+{
+  "ok": false,
+  "reason": "multiplayer_disabled",
+  "message": "Multiplayer is not enabled for this Ziva account. Open Ziva Settings > Ziva Cloud and enable multiplayer."
+}
+```
+
+Clients should call this after a failed relay connection when the platform API
+does not expose WebSocket close reasons directly.
+
 ## Connection lifecycle
 
 1. Client opens `<relay_url>/r/<room>?u=<user_id>&g=<game_id>&v=1`.
@@ -45,7 +64,7 @@ Limits enforced per room:
 
 - **Room cap**: 32 concurrent connections. The 33rd upgrade is rejected with
   close code `1008` and reason `room_full`.
-- **Rate limit**: 60 messages/sec and 32 KiB/sec per connection. Violators
+- **Rate limit**: 1000 messages/sec and 1 MiB/sec per connection. Violators
   are closed with `1008` and reason `rate_limit_exceeded`.
 
 ## Envelopes (v1)
@@ -214,7 +233,11 @@ Semantics:
 | 1008 | unsupported_protocol_version    | `?v` does not match a server-supported major.      |
 | 1008 | missing_params                  | Upgrade URL lacks `u`, `g`, or a `/r/<room>` path. |
 | 1008 | rate_limited                    | Connection attempts exceeded the per-IP/`(u,g)` cap. |
-| 1008 | not_allowed                     | Account check denied (tier, disabled, or capped).  |
+| 1008 | unknown_user                    | Ziva account id is not recognized.                 |
+| 1008 | tier_not_allowed                | Account tier does not include multiplayer.         |
+| 1008 | multiplayer_disabled            | Multiplayer is disabled for this account.          |
+| 1008 | usage_throttled                 | Account is throttled for monthly multiplayer usage. |
+| 1008 | not_allowed                     | Legacy/generic account check denial.               |
 | 1008 | check_unavailable               | Access check failed with no last-good (fail closed). |
 | 1008 | room_full                       | Room is at its 32-peer cap.                        |
 | 1008 | rate_limit_exceeded             | Sender exceeded per-connection message rate limit. |

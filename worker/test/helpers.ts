@@ -28,14 +28,20 @@ function checkPathMatcher(userId: string): (path: string) => boolean {
     path.includes(`u=${encodeURIComponent(userId)}`);
 }
 
-// Stub the NEXT /check call for `userId` to return {allowed}. One-shot by
+// Stub the NEXT /check call for `userId` to return {allowed, reason}. One-shot by
 // default; multiple registrations for the same user are consumed FIFO so a
 // test can script "prime allowed, then refresh not-allowed".
-export function stubCheck(userId: string, allowed: boolean, times = 1): void {
+export function stubCheck(
+  userId: string,
+  allowed: boolean,
+  times = 1,
+  reason?: string,
+): void {
+  const body = reason ? { allowed, reason } : { allowed };
   fetchMock
     .get(CHECK_ORIGIN)
     .intercept({ method: "GET", path: checkPathMatcher(userId) })
-    .reply(200, { allowed })
+    .reply(200, body)
     .times(times);
 }
 

@@ -108,7 +108,8 @@ describe("access gate", () => {
   it("(d) true miss + check→not allowed is 1008 not_allowed; with no negative cache a later check→allowed connects", async () => {
     const u = uid("user-flip");
 
-    // First: deny → closed 1008.
+    // First: legacy deny without a reason → closed 1008 with the generic
+    // reason. This keeps older apps/web responses compatible.
     stubCheck(u, false);
     const denied = await connect({ rid: uid("room"), u, stub: false });
     {
@@ -125,7 +126,25 @@ describe("access gate", () => {
     ok.ws.close();
   });
 
-  it("(e) check throws with an existing positive entry → still allowed + console.error; true miss + throw → 1008 check_unavailable", async () => {
+  it("(e) true miss + structured check denial preserves the exact close reason", async () => {
+    const cases = [
+      "unknown_user",
+      "tier_not_allowed",
+      "multiplayer_disabled",
+      "usage_throttled",
+    ];
+
+    for (const accessReason of cases) {
+      const u = uid(`user-${accessReason}`);
+      stubCheck(u, false, 1, accessReason);
+      const denied = await connect({ rid: uid("room"), u, stub: false });
+      const { code, reason } = await denied.closed;
+      expect(code).toBe(1008);
+      expect(reason).toBe(accessReason);
+    }
+  });
+
+  it("(f) check throws with an existing positive entry → still allowed + console.error; true miss + throw → 1008 check_unavailable", async () => {
     // --- existing positive entry, refresh throws → served last-good ---
     const warm = uid("user-lastgood");
     const first = await connect({ rid: uid("room"), u: warm });
@@ -163,6 +182,81 @@ describe("access gate", () => {
     const { code, reason } = await failed.closed;
     expect(code).toBe(1008);
     expect(reason).toBe("check_unavailable");
+  });
+});
+
+// ---- diagnostic endpoint ----
+
+describe("diagnose", () => {
+  it("returns user-facing JSON for a structured access denial", async () => {
+    const u = uid("user-disabled");
+    stubCheck(u, false, 1, "multiplayer_disabled");
+
+    const res = await SELF.fetch(
+      `http://relay.test/diagnose?u=${encodeURIComponent(u)}&g=game-test&v=1`,
+      { headers: { "CF-Connecting-IP": `ip-${crypto.randomUUID()}` } },
+    );
+    const body = (await res.json()) as { ok: boolean; reason: string; message: string };
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(body.ok).toBe(false);
+    expect(body.reason).toBe("multiplayer_disabled");
+    expect(body.message).toContain("enable multiplayer");
+  });
+
+  it("returns ok:true when access is allowed", async () => {
+    const u = uid("user-diagnose-ok");
+    stubCheck(u, true);
+
+    const res = await SELF.fetch(
+      `http://relay.test/diagnose?u=${encodeURIComponent(u)}&g=game-test&v=1`,
+      { headers: { "CF-Connecting-IP": `ip-${crypto.randomUUID()}` } },
+    );
+    const body = (await res.json()) as { ok: boolean; reason: string; message: string };
+
+    expect(res.status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.reason).toBe("ok");
+    expect(body.message).toContain("enabled");
+  });
+
+  it("returns missing_params without calling apps/web", async () => {
+    const res = await SELF.fetch("http://relay.test/diagnose?u=user-only", {
+      headers: { "CF-Connecting-IP": `ip-${crypto.randomUUID()}` },
+    });
+    const body = (await res.json()) as { ok: boolean; reason: string; message: string };
+
+    expect(res.status).toBe(400);
+    expect(body.ok).toBe(false);
+    expect(body.reason).toBe("missing_params");
+    expect(body.message).toContain("missing Ziva multiplayer settings");
+  });
+
+  it("returns check_unavailable when apps/web cannot be reached", async () => {
+    const u = uid("user-diagnose-fail");
+    stubCheckError(u);
+
+    const errors: string[] = [];
+    const origError = console.error;
+    console.error = (...args: unknown[]) => {
+      errors.push(args.map(String).join(" "));
+    };
+    try {
+      const res = await SELF.fetch(
+        `http://relay.test/diagnose?u=${encodeURIComponent(u)}&g=game-test&v=1`,
+        { headers: { "CF-Connecting-IP": `ip-${crypto.randomUUID()}` } },
+      );
+      const body = (await res.json()) as { ok: boolean; reason: string; message: string };
+
+      expect(res.status).toBe(503);
+      expect(body.ok).toBe(false);
+      expect(body.reason).toBe("check_unavailable");
+      expect(body.message).toContain("could not verify");
+      expect(errors.some((l) => l.includes(u))).toBe(true);
+    } finally {
+      console.error = origError;
+    }
   });
 });
 
@@ -369,14 +463,14 @@ describe("relay", () => {
     c3.ws.close();
   });
 
-  it("closes a peer that sends >60 msg/s with 1008 within 1s", async () => {
+  it("closes a peer that exceeds the per-second message cap with 1008 within 1s", async () => {
     const rid = uid("room-rate-msg");
     const a = await connect({ rid, u: uid("rate-a") });
     await readPeerId(a);
 
     const start = Date.now();
     const payload = buildRelayPacket(0, new Uint8Array([0x00]));
-    for (let i = 0; i < 70; i++) {
+    for (let i = 0; i < 1100; i++) {
       try {
         a.ws.send(payload);
       } catch {

@@ -19,6 +19,31 @@ export { ConnRateDO, RoomDO };
 
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([1]);
 
+const AccessReason = {
+  Ok: "ok",
+  UnknownUser: "unknown_user",
+  TierNotAllowed: "tier_not_allowed",
+  MultiplayerDisabled: "multiplayer_disabled",
+  UsageThrottled: "usage_throttled",
+  RateLimited: "rate_limited",
+  MissingParams: "missing_params",
+  UnsupportedProtocolVersion: "unsupported_protocol_version",
+  NotAllowed: "not_allowed",
+  CheckUnavailable: "check_unavailable",
+} as const;
+
+type AccessReason = (typeof AccessReason)[keyof typeof AccessReason];
+type CheckDeniedReason =
+  | typeof AccessReason.UnknownUser
+  | typeof AccessReason.TierNotAllowed
+  | typeof AccessReason.MultiplayerDisabled
+  | typeof AccessReason.UsageThrottled
+  | typeof AccessReason.NotAllowed;
+
+type AccessDecision =
+  | { allowed: true; reason: typeof AccessReason.Ok }
+  | { allowed: false; reason: CheckDeniedReason | typeof AccessReason.CheckUnavailable };
+
 // Positive cache TTL. After this a cached user is "stale" — still served from
 // last-good, but a background refresh fires (see stale-while-revalidate below).
 const POSITIVE_TTL_MS = 60_000;
@@ -45,9 +70,55 @@ function acceptAndClose(code: number, reason: string): Response {
   return new Response(null, { status: 101, webSocket: pair[0] });
 }
 
+function json(data: unknown, init: ResponseInit = {}): Response {
+  const headers = new Headers(init.headers);
+  headers.set("Cache-Control", "no-store");
+  return Response.json(data, {
+    ...init,
+    headers,
+  });
+}
+
+function diagnosticMessage(reason: AccessReason): string {
+  switch (reason) {
+    case AccessReason.Ok:
+      return "Multiplayer relay access is enabled.";
+    case AccessReason.MissingParams:
+      return "This game is missing Ziva multiplayer settings. Re-enable multiplayer in Ziva Settings > Ziva Cloud, then export the game again.";
+    case AccessReason.UnsupportedProtocolVersion:
+      return "This game was exported with an unsupported Ziva multiplayer protocol version. Update Ziva and export the game again.";
+    case AccessReason.RateLimited:
+      return "Too many multiplayer connection attempts were made recently. Wait a minute and try again.";
+    case AccessReason.UnknownUser:
+      return "This multiplayer user is not recognized by Ziva. Re-enable multiplayer in Ziva Settings > Ziva Cloud, then export the game again.";
+    case AccessReason.TierNotAllowed:
+      return "Your current Ziva subscription tier does not include multiplayer. Upgrade to Basic or above, then try again.";
+    case AccessReason.MultiplayerDisabled:
+      return "Multiplayer is not enabled for this Ziva account. Open Ziva Settings > Ziva Cloud and enable multiplayer.";
+    case AccessReason.UsageThrottled:
+      return "This account has reached its multiplayer bandwidth limit for the month. Wait for the limit to reset or upgrade your plan.";
+    case AccessReason.CheckUnavailable:
+      return "Ziva could not verify multiplayer access right now. Try again shortly.";
+    case AccessReason.NotAllowed:
+      return "Ziva did not allow this multiplayer connection. Check your subscription, multiplayer setting, and account status.";
+  }
+}
+
+function normalizeCheckReason(reason: unknown): CheckDeniedReason {
+  switch (reason) {
+    case AccessReason.UnknownUser:
+    case AccessReason.TierNotAllowed:
+    case AccessReason.MultiplayerDisabled:
+    case AccessReason.UsageThrottled:
+      return reason;
+    default:
+      return AccessReason.NotAllowed;
+  }
+}
+
 // One /check round-trip. Throws on transport failure (caller decides how to
-// degrade); returns the boolean `allowed` on a clean response.
-async function fetchAllowed(env: Env, userId: string): Promise<boolean> {
+// degrade); returns the structured access decision on a clean response.
+async function fetchAccessDecision(env: Env, userId: string): Promise<AccessDecision> {
   // Staging apps/web sits behind Vercel deployment protection, so this
   // server-to-server call must carry a protection-bypass token. The var is set
   // ONLY on staging; prod apps/web is public, leaves it unset, and sends nothing.
@@ -62,8 +133,11 @@ async function fetchAllowed(env: Env, userId: string): Promise<boolean> {
   if (!res.ok) {
     throw new Error(`check returned ${res.status}`);
   }
-  const body = (await res.json()) as { allowed?: unknown };
-  return body.allowed === true;
+  const body = (await res.json()) as { allowed?: unknown; reason?: unknown };
+  if (body.allowed === true) {
+    return { allowed: true, reason: AccessReason.Ok };
+  }
+  return { allowed: false, reason: normalizeCheckReason(body.reason) };
 }
 
 // Decide whether `userId` may connect, applying stale-while-revalidate against
@@ -76,6 +150,8 @@ async function fetchAllowed(env: Env, userId: string): Promise<boolean> {
 // Failure modes (loud, never silent):
 // - /check throws on a true miss          → deny (fail CLOSED). The caller
 //   maps this to close code "check_unavailable".
+// - /check denies on a true miss          → deny with the exact reason from
+//                                            apps/web when available.
 // - /check throws but a positive entry    → serve last-good AND console.error.
 //   exists (even if expired)                Keeps subscribers online through a
 //                                            transient apps/web outage.
@@ -83,12 +159,12 @@ async function checkAllowed(
   env: Env,
   ctx: ExecutionContext,
   userId: string,
-): Promise<{ allowed: boolean; reason: "ok" | "not_allowed" | "check_unavailable" }> {
+): Promise<AccessDecision> {
   const now = Date.now();
   const cached = positiveCache.get(userId);
 
   if (cached && cached.expiresAt > now) {
-    return { allowed: true, reason: "ok" };
+    return { allowed: true, reason: AccessReason.Ok };
   }
 
   if (cached) {
@@ -97,8 +173,8 @@ async function checkAllowed(
     ctx.waitUntil(
       (async () => {
         try {
-          const allowed = await fetchAllowed(env, userId);
-          if (allowed) {
+          const decision = await fetchAccessDecision(env, userId);
+          if (decision.allowed) {
             positiveCache.set(userId, { expiresAt: Date.now() + POSITIVE_TTL_MS });
           } else {
             // Access revoked while cached — drop so the next attempt is a
@@ -113,24 +189,24 @@ async function checkAllowed(
         }
       })(),
     );
-    return { allowed: true, reason: "ok" };
+    return { allowed: true, reason: AccessReason.Ok };
   }
 
   // True miss — blocking check.
   try {
-    const allowed = await fetchAllowed(env, userId);
-    if (allowed) {
+    const decision = await fetchAccessDecision(env, userId);
+    if (decision.allowed) {
       positiveCache.set(userId, { expiresAt: now + POSITIVE_TTL_MS });
-      return { allowed: true, reason: "ok" };
+      return decision;
     }
-    return { allowed: false, reason: "not_allowed" };
+    return decision;
   } catch (err) {
     // True miss + transport failure: fail CLOSED. We have no last-good to
     // fall back to and must never let an unverified user in.
     console.error(
       `multiplayer check failed (no cached entry) for ${userId}: ${(err as Error).message}`,
     );
-    return { allowed: false, reason: "check_unavailable" };
+    return { allowed: false, reason: AccessReason.CheckUnavailable };
   }
 }
 
@@ -160,31 +236,92 @@ async function withinConnRate(
   return ipOk && ugOk;
 }
 
+async function diagnose(request: Request, env: Env): Promise<Response> {
+  const url = new URL(request.url);
+  const versionRaw = url.searchParams.get("v");
+  const version = versionRaw === null ? 1 : Number(versionRaw);
+  const userId = url.searchParams.get("u");
+  const gameId = url.searchParams.get("g");
+
+  if (!Number.isInteger(version) || !SUPPORTED_PROTOCOL_VERSIONS.has(version)) {
+    return json({
+      ok: false,
+      reason: AccessReason.UnsupportedProtocolVersion,
+      message: diagnosticMessage(AccessReason.UnsupportedProtocolVersion),
+    });
+  }
+
+  if (!userId || !gameId) {
+    return json(
+      {
+        ok: false,
+        reason: AccessReason.MissingParams,
+        message: diagnosticMessage(AccessReason.MissingParams),
+      },
+      { status: 400 },
+    );
+  }
+
+  const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
+  if (!(await withinConnRate(env, ip, userId, gameId))) {
+    return json({
+      ok: false,
+      reason: AccessReason.RateLimited,
+      message: diagnosticMessage(AccessReason.RateLimited),
+    });
+  }
+
+  try {
+    const decision = await fetchAccessDecision(env, userId);
+    return json({
+      ok: decision.allowed,
+      reason: decision.reason,
+      message: diagnosticMessage(decision.reason),
+    });
+  } catch (err) {
+    console.error(
+      `multiplayer diagnostic check failed for ${userId}: ${(err as Error).message}`,
+    );
+    return json(
+      {
+        ok: false,
+        reason: AccessReason.CheckUnavailable,
+        message: diagnosticMessage(AccessReason.CheckUnavailable),
+      },
+      { status: 503 },
+    );
+  }
+}
+
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === "/diagnose") {
+      return diagnose(request, env);
+    }
+
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("ziva-multiplayer relay — websocket only", { status: 404 });
     }
 
-    const url = new URL(request.url);
     const versionRaw = url.searchParams.get("v");
     const version = versionRaw === null ? 1 : Number(versionRaw);
     if (!Number.isInteger(version) || !SUPPORTED_PROTOCOL_VERSIONS.has(version)) {
-      return acceptAndClose(1008, "unsupported_protocol_version");
+      return acceptAndClose(1008, AccessReason.UnsupportedProtocolVersion);
     }
 
     const userId = url.searchParams.get("u");
     const gameId = url.searchParams.get("g");
     const room = parseRoomId(url);
     if (!userId || !gameId || !room) {
-      return acceptAndClose(1008, "missing_params");
+      return acceptAndClose(1008, AccessReason.MissingParams);
     }
 
     // Bound raw attempts FIRST so the no-negative-cache /check below can't be
     // weaponized into unbounded origin fan-out.
     const ip = request.headers.get("CF-Connecting-IP") ?? "unknown";
     if (!(await withinConnRate(env, ip, userId, gameId))) {
-      return acceptAndClose(1008, "rate_limited");
+      return acceptAndClose(1008, AccessReason.RateLimited);
     }
 
     const decision = await checkAllowed(env, ctx, userId);

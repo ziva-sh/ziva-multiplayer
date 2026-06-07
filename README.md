@@ -1,9 +1,8 @@
 # ziva-multiplayer
 
 Cloudflare Worker + Durable Object relay that powers real-time multiplayer for
-Ziva-built games. Authenticates short-lived HS256 JWTs minted by
-[`ziva.sh`](https://ziva.sh) and brokers WebSocket messages between peers in
-the same room.
+Ziva-built games. Gates connection attempts against [`ziva.sh`](https://ziva.sh)
+account state and brokers WebSocket messages between peers in the same room.
 
 This repo is intentionally narrow: it implements the wire protocol and the
 relay. Token issuance, billing, and game logic live elsewhere.
@@ -11,13 +10,15 @@ relay. Token issuance, billing, and game logic live elsewhere.
 ## Architecture
 
 ```
-Game client ──ws──► Worker (auth) ──► RoomDO (broadcast)
+Game client ──ws──► Worker (access gate) ──► RoomDO (broadcast)
                        │
+                       ├─► ziva.sh /api/multiplayer/check
                        └─► Analytics Engine (usage metrics)
 ```
 
 - **Worker** (`worker/src/index.ts`): terminates the WebSocket upgrade,
-  verifies the JWT, looks up the `RoomDO` by `rid` claim, forwards the upgrade.
+  checks the owning Ziva account, looks up the `RoomDO` by room id, forwards
+  the upgrade, and exposes `/diagnose` for user-facing failure messages.
 - **RoomDO** (`worker/src/room-do.ts`): one Durable Object per room. Uses the
   Hibernation API so idle rooms cost nothing. Enforces room cap, per-connection
   rate limit, and broadcasts messages to all peers except the sender.
