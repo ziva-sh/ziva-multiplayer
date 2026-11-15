@@ -17,7 +17,7 @@ Game client ──ws──► Worker (access gate) ──► RoomDO (broadcast)
 ```
 
 - **Worker** (`worker/src/index.ts`): terminates the WebSocket upgrade,
-  checks the owning Ziva account, looks up the `RoomDO` by room id, forwards
+  checks the owning Ziva account, looks up the `RoomDO` by game and room id, forwards
   the upgrade, and exposes `/diagnose` for user-facing failure messages.
 - **RoomDO** (`worker/src/room-do.ts`): one Durable Object per room. Uses the
   Hibernation API so idle rooms cost nothing. Enforces room cap, per-connection

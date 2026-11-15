@@ -13,6 +13,7 @@ import {
   SYS_COMMAND_DEL_PEER,
   SYS_COMMAND_RELAY,
 } from "../src/proto/v1";
+import { roomKey } from "../src/room-do";
 
 // The Worker's access check fetches `${ZIVA_API_BASE}/api/multiplayer/check`.
 // We mock that origin via Miniflare's fetch mock. Reading the origin from the
@@ -69,6 +70,8 @@ export interface ConnectOptions {
 
 export interface Connection {
   ws: WebSocket;
+  // The RoomDO name this connection landed in.
+  key: string;
   // Returns the next message as raw bytes. Throws on timeout.
   next(timeoutMs?: number): Promise<Uint8Array>;
   closed: Promise<{ code: number; reason: string }>;
@@ -86,7 +89,8 @@ export class UpgradeFailure extends Error {
 export async function connect(opts: ConnectOptions = {}): Promise<Connection> {
   const rid = opts.rid ?? "room-test";
   const u = opts.u ?? "user-test";
-  const g = opts.g ?? "game-test";
+  // Rooms are scoped per game, so peers in one test room share a game.
+  const g = opts.g ?? `game-${rid}`;
   const v = opts.v ?? 1;
   // Default to a unique IP per call so normal tests never contend on the
   // shared per-IP connection-rate window. Rate-limit tests pin `ip` to make
@@ -143,6 +147,7 @@ export async function connect(opts: ConnectOptions = {}): Promise<Connection> {
 
   return {
     ws,
+    key: roomKey(g, rid),
     closed,
     next(timeoutMs = 500) {
       return new Promise<Uint8Array>((resolve, reject) => {

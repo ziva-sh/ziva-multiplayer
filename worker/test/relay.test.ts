@@ -318,6 +318,18 @@ describe("relay", () => {
     a.ws.close();
   });
 
+  it("keeps the same room name in another game as a separate room", async () => {
+    const rid = uid("room-common-name");
+    const a = await connect({ rid, u: uid("user-a"), g: "game-alpha" });
+    const b = await connect({ rid, u: uid("user-b"), g: "game-beta" });
+    expect(await readPeerId(a)).toBe(2);
+    expect(await readPeerId(b)).toBe(2);
+    await expect(a.next(300), "no ADD_PEER from the other game").rejects.toThrow("timeout");
+    await expect(b.next(300), "no ADD_PEER from the other game").rejects.toThrow("timeout");
+    a.ws.close();
+    b.ws.close();
+  });
+
   it("relays a unicast SYS_COMMAND_RELAY from A to B with sender_id rewritten", async () => {
     const rid = uid("room-relay");
     const a = await connect({ rid, u: uid("user-a") });
@@ -510,7 +522,7 @@ describe("relay", () => {
 
     await new Promise((r) => setTimeout(r, 1000));
 
-    const stub = env.ROOM.getByName(rid);
+    const stub = env.ROOM.getByName(a.key);
     await runInDurableObject(stub, async (_: RoomDO, state) => {
       expect(state.getWebSockets().length).toBe(2);
     });
@@ -550,7 +562,7 @@ describe("relay", () => {
 
       await new Promise((r) => setTimeout(r, 100));
 
-      const stub = env.ROOM.getByName(rid);
+      const stub = env.ROOM.getByName(a.key);
       await runInDurableObject(stub, async (_inst, state) => {
         expect(state.getWebSockets().length).toBe(0);
       });

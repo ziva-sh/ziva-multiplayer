@@ -183,6 +183,21 @@ describe("world store: DO-persisted world survives all-peers-left", () => {
     b.ws.close();
   });
 
+  it("keeps a saved world inside its own game", async () => {
+    const rid = uid("room");
+    const a = await connect({ rid, u: uid("ua"), g: "game-alpha" });
+    await readPeerId(a);
+    a.ws.send(new Uint8Array([WORLD_SAVE, 1, 2, 3]));
+    expect(await findFrame(a, WORLD_SAVE_ACK), "ack").not.toBeNull();
+
+    const b = await connect({ rid, u: uid("ub"), g: "game-beta" });
+    await readPeerId(b);
+    const world = await findFrame(b, WORLD_LOAD, 3, 300);
+    expect(world, "another game's room never sees this world").toBeNull();
+    a.ws.close();
+    b.ws.close();
+  });
+
   it("an oversized save fails LOUD — socket closed, never silently dropped", async () => {
     const rid = uid("room");
     const a = await connect({ rid, u: uid("ua") });
