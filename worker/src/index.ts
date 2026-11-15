@@ -11,7 +11,7 @@ import {
   CONN_RATE_LIMIT_PER_UG,
   CONN_RATE_WINDOW_MS,
 } from "./conn-rate-do";
-import { RoomDO } from "./room-do";
+import { RoomDO, roomKey } from "./room-do";
 
 export { ConnRateDO, RoomDO };
 
@@ -356,9 +356,7 @@ export default {
       return acceptAndClose(1008, decision.reason);
     }
 
-    // RoomDO is named by room id — same room id always lands on the same DO
-    // instance globally.
-    const stub = env.ROOM.getByName(room);
+    const stub = env.ROOM.getByName(roomKey(gameId, room));
 
     // Forward the upgrade. The DO trusts these headers because only this
     // Worker (same script binding) can set them.

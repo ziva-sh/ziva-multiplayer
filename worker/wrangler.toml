@@ -33,6 +33,8 @@ dataset = "multiplayer"
 [vars]
 ZIVA_API_BASE = "http://localhost:3000"
 LOG_DRAIN_URL = ""
+# legacyRoomHash("game-legacy", "room-legacy-listed"), the suite's listed room.
+LEGACY_ROOM_HASHES = "a9f4bc2408654f6e"
 
 # ---- Staging environment ----
 # Deployed via `wrangler deploy --env staging`. Hostname is the default
@@ -69,6 +71,7 @@ dataset = "multiplayer"
 [env.staging.vars]
 ZIVA_API_BASE = "https://staging.ziva.sh"
 LOG_DRAIN_URL = ""
+LEGACY_ROOM_HASHES = ""
 
 # ---- Production environment ----
 [env.production]
@@ -97,3 +100,6 @@ dataset = "multiplayer"
 [env.production.vars]
 ZIVA_API_BASE = "https://ziva.sh"
 LOG_DRAIN_URL = ""
+# Rooms with world_saved/state_set events from 2026-08-15 (Analytics Engine
+# retention start) to 2026-11-15, each saved by exactly one game.
+LEGACY_ROOM_HASHES = "00fc82328baf9bbc,037304c4a7ebc7c5,064e0d45f04a0286,09e2e8db05db11f7,0b8d43ec8eb9f031,0c376e40c2548c27,0f33bb4178347082,1496f68b6266c3ea,181b3dd0913f8e28,18b05f76ca19b890,1958a2592d345729,1b8256350397c524,20e7f6d32bd20676,2418c9ba28f065ea,25bb0b940af6e247,25db6d8b5b3a4d44,2975ee6f27c283c3,2b5bf06b97c8997e,2db93a65494706df,2ef6a213ba2fcae9,39e60d60ffcc5978,3b41ebcbfdccb76b,3b668d6a0b93cfa6,3e462ab3243d056f,3f1bd89f6f2b917b,419665f1b282ef4e,43472d597f2e9593,4381ebdffc776eec,43fae5816b29c5c7,48f5be15674630ef,49c4d9e2ec3ac98b,4fbdd0498a01aa97,51a72ff2b5be43a0,552667119db80fe4,594352ecb3bd7f37,5a1c8929cf6f94fc,5cf973d07cfeb2fb,679411876e0e0241,67ede587f3a6ea95,6abf11571e852f09,6be1c836eb62573e,6f96a9ac1d0e0602,714beeeac3b8989a,716fd72f46876fd8,71e68feb0da3f111,839aa440cd2daafc,8a386ba9ba5b01db,8b69386707e25d80,8d65f8e284dfb261,90b8b38d1806537c,9680958346264b76,a09d4b55785814f8,a45672a3b73e79ea,a56a5fb1bd614f2a,b89d3d4dba3ef3c1,bfb693273e3e160f,c22dba90c1671af5,c6a38a20b7ee40d8,cb6e76c6826bcfa7,cf1eb8d039eceb9a,d69c34bef6773bbd,db56cf19fe3ccbe8,db75bec0b5f3916b,e02c4cc9d1e78a28,e2caab5d0324f35a,e5b15ff37b1e696d,e7ec8da884ea3a15,ed6915bb32bf7f3e,edc5d164c627815b,eeddc1f90794b15c,eee62df3d7e960a6,ef9fe18056eada92,f5a86dc41063d725,fa6c8caa67f5a343,fe911545f54a54c8,ff1cf4e61202257d,ff7e9c2e03219506"

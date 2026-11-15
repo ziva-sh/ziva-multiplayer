@@ -54,7 +54,8 @@ does not expose WebSocket close reasons directly.
 
 1. Client opens `<relay_url>/r/<room>?u=<user_id>&g=<game_id>&v=1`.
 2. Worker checks access (see Authentication) and forwards to the `RoomDO`
-   named by the room id.
+   named by `(game_id, room)`. The same room name in another game is a
+   different room, with its own peers and saved data.
 3. RoomDO assigns the next monotonic `peer_id` (starting at 1) and accepts
    the socket via the Hibernation API.
 4. Server sends a `welcome` envelope to the new peer.
