@@ -22,8 +22,7 @@ const SUPPORTED_PROTOCOL_VERSIONS = new Set([1]);
 const AccessReason = {
   Ok: "ok",
   UnknownUser: "unknown_user",
-  TierNotAllowed: "tier_not_allowed",
-  MultiplayerDisabled: "multiplayer_disabled",
+  ProRequired: "pro_required",
   UsageThrottled: "usage_throttled",
   RateLimited: "rate_limited",
   MissingParams: "missing_params",
@@ -35,8 +34,7 @@ const AccessReason = {
 type AccessReason = (typeof AccessReason)[keyof typeof AccessReason];
 type CheckDeniedReason =
   | typeof AccessReason.UnknownUser
-  | typeof AccessReason.TierNotAllowed
-  | typeof AccessReason.MultiplayerDisabled
+  | typeof AccessReason.ProRequired
   | typeof AccessReason.UsageThrottled
   | typeof AccessReason.NotAllowed;
 
@@ -108,31 +106,28 @@ function diagnosticMessage(reason: AccessReason): string {
     case AccessReason.Ok:
       return "Multiplayer relay access is enabled.";
     case AccessReason.MissingParams:
-      return "This game is missing Ziva multiplayer settings. Re-enable multiplayer in Ziva Settings > Ziva Cloud, then export the game again.";
+      return "This game is missing its Ziva multiplayer setup. Ask Ziva to set up multiplayer again, then export the game again.";
     case AccessReason.UnsupportedProtocolVersion:
       return "This game was exported with an unsupported Ziva multiplayer protocol version. Update Ziva and export the game again.";
     case AccessReason.RateLimited:
       return "Too many multiplayer connection attempts were made recently. Wait a minute and try again.";
     case AccessReason.UnknownUser:
-      return "This multiplayer user is not recognized by Ziva. Re-enable multiplayer in Ziva Settings > Ziva Cloud, then export the game again.";
-    case AccessReason.TierNotAllowed:
-      return "Your current Ziva subscription tier does not include multiplayer. Upgrade to Basic or above, then try again.";
-    case AccessReason.MultiplayerDisabled:
-      return "Multiplayer is not enabled for this Ziva account. Open Ziva Settings > Ziva Cloud and enable multiplayer.";
+      return "Ziva doesn't recognize the account in this game. Ask Ziva to set up multiplayer again, then export the game again.";
+    case AccessReason.ProRequired:
+      return "Multiplayer needs a Ziva Pro or Ultra plan. Upgrade at ziva.sh/account, then try again.";
     case AccessReason.UsageThrottled:
-      return "This account has reached its multiplayer bandwidth limit for the month. Wait for the limit to reset or upgrade your plan.";
+      return "This game's Ziva account reached its multiplayer limit for the month. New players can join again next month.";
     case AccessReason.CheckUnavailable:
       return "Ziva could not verify multiplayer access right now. Try again shortly.";
     case AccessReason.NotAllowed:
-      return "Ziva did not allow this multiplayer connection. Check your subscription, multiplayer setting, and account status.";
+      return "Ziva didn't allow this connection. Try again later, or contact Ziva support.";
   }
 }
 
 function normalizeCheckReason(reason: unknown): CheckDeniedReason {
   switch (reason) {
     case AccessReason.UnknownUser:
-    case AccessReason.TierNotAllowed:
-    case AccessReason.MultiplayerDisabled:
+    case AccessReason.ProRequired:
     case AccessReason.UsageThrottled:
       return reason;
     default:
