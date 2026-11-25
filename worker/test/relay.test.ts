@@ -129,8 +129,7 @@ describe("access gate", () => {
   it("(e) true miss + structured check denial preserves the exact close reason", async () => {
     const cases = [
       "unknown_user",
-      "tier_not_allowed",
-      "multiplayer_disabled",
+      "pro_required",
       "usage_throttled",
     ];
 
@@ -189,8 +188,8 @@ describe("access gate", () => {
 
 describe("diagnose", () => {
   it("returns user-facing JSON for a structured access denial", async () => {
-    const u = uid("user-disabled");
-    stubCheck(u, false, 1, "multiplayer_disabled");
+    const u = uid("user-free");
+    stubCheck(u, false, 1, "pro_required");
 
     const res = await SELF.fetch(
       `http://relay.test/diagnose?u=${encodeURIComponent(u)}&g=game-test&v=1`,
@@ -203,8 +202,8 @@ describe("diagnose", () => {
     expect(res.headers.get("Access-Control-Allow-Origin")).toBe("*");
     expect(res.headers.get("Access-Control-Allow-Methods")).toContain("GET");
     expect(body.ok).toBe(false);
-    expect(body.reason).toBe("multiplayer_disabled");
-    expect(body.message).toContain("enable multiplayer");
+    expect(body.reason).toBe("pro_required");
+    expect(body.message).toContain("Pro or Ultra");
   });
 
   it("handles browser preflight for relay diagnostics", async () => {
@@ -244,7 +243,7 @@ describe("diagnose", () => {
     expect(res.status).toBe(400);
     expect(body.ok).toBe(false);
     expect(body.reason).toBe("missing_params");
-    expect(body.message).toContain("missing Ziva multiplayer settings");
+    expect(body.message).toContain("missing its Ziva multiplayer setup");
   });
 
   it("returns check_unavailable when apps/web cannot be reached", async () => {

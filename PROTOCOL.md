@@ -26,8 +26,8 @@ The room id comes from the `/r/<room>` path segment, not a query param.
 These values are not secrets; they say *which* account a connection belongs
 to. On each upgrade the Worker bounds raw attempts with `ConnRateDO` (per-IP
 and per-`(u,g)`), then asks the Ziva web app `GET /api/multiplayer/check?u=<u>`
-whether that account may connect (subscribed tier, multiplayer enabled, under
-its bandwidth cap). A denied or unavailable check rejects the upgrade with WS
+whether that account may connect (Pro or Ultra plan, under its monthly
+bandwidth cap). A denied or unavailable check rejects the upgrade with WS
 close code `1008` — the WebSocket is accepted then immediately closed, never
 fully established. Missing `u`, `g`, or room → `1008` `missing_params`.
 
@@ -42,8 +42,8 @@ The response is not cached and returns an actionable reason/message:
 ```json
 {
   "ok": false,
-  "reason": "multiplayer_disabled",
-  "message": "Multiplayer is not enabled for this Ziva account. Open Ziva Settings > Ziva Cloud and enable multiplayer."
+  "reason": "pro_required",
+  "message": "Multiplayer needs a Ziva Pro or Ultra plan. Upgrade at ziva.sh/account, then try again."
 }
 ```
 
@@ -235,8 +235,7 @@ Semantics:
 | 1008 | missing_params                  | Upgrade URL lacks `u`, `g`, or a `/r/<room>` path. |
 | 1008 | rate_limited                    | Connection attempts exceeded the per-IP/`(u,g)` cap. |
 | 1008 | unknown_user                    | Ziva account id is not recognized.                 |
-| 1008 | tier_not_allowed                | Account tier does not include multiplayer.         |
-| 1008 | multiplayer_disabled            | Multiplayer is disabled for this account.          |
+| 1008 | pro_required                    | Account has no Pro or Ultra plan.                  |
 | 1008 | usage_throttled                 | Account is throttled for monthly multiplayer usage. |
 | 1008 | not_allowed                     | Legacy/generic account check denial.               |
 | 1008 | check_unavailable               | Access check failed with no last-good (fail closed). |
